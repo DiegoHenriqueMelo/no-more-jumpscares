@@ -1,0 +1,23 @@
+#!/bin/sh
+# Commit-msg hook que valida o formato Conventional Commits.
+# Instalado via: `git config core.hooksPath .githooks`
+
+MSG_FILE="$1"
+if [ -z "$MSG_FILE" ]; then
+  exit 0
+fi
+
+# lê a primeira linha da mensagem de commit
+MSG="$(sed -n '1p' "$MSG_FILE")"
+
+regex='^(feat|fix|docs|style|refactor|perf|test|chore|build|ci|revert|release)(\([a-zA-Z0-9_.-]+\))?(!)?:\s.+'
+
+echo "$MSG" | grep -E "$regex" > /dev/null 2>&1
+if [ $? -ne 0 ]; then
+  echo "ERROR: Mensagem de commit não segue Conventional Commits."
+  echo "Formato esperado: <type>(<scope?>): <subject>"
+  echo "Exemplo: feat(camera): adicionar detecção de movimento"
+  exit 1
+fi
+
+exit 0
