@@ -10,6 +10,27 @@ PASTA_LOGS    = "logs"
 os.makedirs(PASTA_MODELOS, exist_ok=True)
 os.makedirs(PASTA_LOGS,    exist_ok=True)
 
+def _carregar_env(caminho: str = ".env") -> None:
+    if not os.path.exists(caminho):
+        return
+
+    with open(caminho, "r", encoding="utf-8") as arquivo:
+        for linha in arquivo:
+            conteudo = linha.strip()
+            if not conteudo or conteudo.startswith("#") or "=" not in conteudo:
+                continue
+
+            chave, valor = conteudo.split("=", 1)
+            chave = chave.strip()
+            valor = valor.strip().strip('"').strip("'")
+            os.environ.setdefault(chave, valor)
+
+def _env_str_obrigatorio(nome: str) -> str:
+    valor = os.getenv(nome)
+    if valor is None or valor.strip() == "":
+        raise ValueError(f"Variavel obrigatoria ausente no .env: {nome}")
+    return valor.strip()
+
 
 class LogCallback(BaseCallback):
     def __init__(self):
@@ -46,6 +67,7 @@ class LogCallback(BaseCallback):
             taxa_vitoria = (self.vitorias / self.episodio) * 100
 
             linha = (
+                f"{_env_str_obrigatorio("PC")} | "
                 f"Ep {self.episodio:4d} | "
                 f"{resultado:8s} | "
                 f"Passos: {info.get('passos', 0):6d} | "
@@ -94,7 +116,7 @@ def treinar(timesteps: int = 500_000, carregar_modelo: str = None):
     checkpoint = CheckpointCallback(
         save_freq=10_000,
         save_path=PASTA_MODELOS,
-        name_prefix="fnaf_ppo",
+        name_prefix=f"{_env_str_obrigatorio('PC')}_fnaf_ppo",
     )
 
     print(f"Treinando por {timesteps:,} timesteps...\n")
