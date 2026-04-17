@@ -2,9 +2,10 @@
 Calibracao guiada por passos para coordenadas de clique do FNAF.
 
 Mantem o jeito atual (src.utils.calibrar), mas oferece um fluxo guiado:
-1) portas e luzes
-2) abrir/fechar camera (um unico botao)
-3) todas as cameras
+1) botao de iniciar/reset (menu)
+2) portas e luzes
+3) abrir/fechar camera (um unico botao)
+4) todas as cameras
 
 No final, exibe o bloco formatado para colar no .env.
 """
@@ -26,9 +27,24 @@ VK_LBUTTON = 0x01
 class PassoCalibracao:
     chave_env: str
     descricao: str
+    prefixo_env: str = "FNAF_COORD"
+
+    @property
+    def variavel_base(self) -> str:
+        return f"{self.prefixo_env}_{self.chave_env}"
 
 
 GRUPOS: list[tuple[str, list[PassoCalibracao]]] = [
+    (
+        "Menu inicial",
+        [
+            PassoCalibracao(
+                "RESET_CLICK",
+                "Botao de iniciar/continuar no menu",
+                prefixo_env="FNAF",
+            ),
+        ],
+    ),
     (
         "Portas e luzes",
         [
@@ -103,14 +119,14 @@ def _imprimir_bloco_env(coords: dict[str, tuple[int, int]]) -> None:
     print("\n" + "=" * 72)
     print("BLOCO FORMATADO PARA O .env")
     print("=" * 72)
-    print("# Coordenadas das acoes do agente")
+    print("# Coordenadas de reset e das acoes do agente")
     print()
 
     for _, passos in GRUPOS:
         for passo in passos:
-            x, y = coords[passo.chave_env]
-            print(f"FNAF_COORD_{passo.chave_env}_X={x}")
-            print(f"FNAF_COORD_{passo.chave_env}_Y={y}")
+            x, y = coords[passo.variavel_base]
+            print(f"{passo.variavel_base}_X={x}")
+            print(f"{passo.variavel_base}_Y={y}")
             print()
 
 
@@ -133,7 +149,7 @@ def executar_calibracao_guiada() -> None:
         for passo in passos:
             print(f"[{atual}/{total_passos}] Clique agora em: {passo.descricao}")
             x, y = _capturar_coordenada()
-            coords[passo.chave_env] = (x, y)
+            coords[passo.variavel_base] = (x, y)
             print(f"    Capturado -> x={x}, y={y}")
             atual += 1
 
