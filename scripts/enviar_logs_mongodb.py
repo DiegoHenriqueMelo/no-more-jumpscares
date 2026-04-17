@@ -22,6 +22,7 @@ import json
 import os
 import platform
 import re
+import unicodedata
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,12 +37,20 @@ except ImportError:  # pragma: no cover - depende do ambiente do usuario
 LOG_PATTERN = re.compile(
     r"^\s*(?:(?P<pc>[^|]+?)\s*\|\s*)?Ep\s*(?P<ep>\d+)\s*\|\s*"
     r"(?P<resultado>[A-Za-z_]+)\s*\|\s*Passos:\s*(?P<passos>-?\d+)\s*\|\s*"
+    r"(?:(?:Tempo(?:\s+EP)?):\s*(?P<tempo_minutos>-?\d+(?:[.,]\d+)?)\s*min(?:utos)?\s*\|\s*)?"
     r"Recompensa:\s*(?P<recompensa>-?\d+(?:[.,]\d+)?)\s*\|\s*"
     r"Taxa[^:]*:\s*(?P<taxa>-?\d+(?:[.,]\d+)?)%\s*$",
     re.IGNORECASE,
 )
 
 TREINO_INICIADO_PATTERN = re.compile(r"^\s*Treino iniciado\s*$", re.IGNORECASE)
+RESULTADOS_QUE_AVANCAM_NOITE = {
+    "VITORIA",
+    "VITORIA_6AM",
+    "VICTORIA",
+    "WIN",
+    "VICTORY",
+}
 
 
 def carregar_env(caminho: Path = Path(".env")) -> None:
@@ -97,6 +106,96 @@ def para_numero(valor: str) -> int | float | str | None:
     return texto
 
 
+def para_inteiro(valor: Any) -> int | None:
+    if isinstance(valor, bool):
+        return None
+    if isinstance(valor, (int, float)):
+        return int(valor)
+    if isinstance(valor, str):
+        convertido = para_numero(valor)
+        if isinstance(convertido, (int, float)):
+            return int(convertido)
+    return None
+
+
+def para_float(valor: Any) -> float | None:
+    if isinstance(valor, bool):
+        return None
+    if isinstance(valor, (int, float)):
+        return float(valor)
+    if isinstance(valor, str):
+        convertido = para_numero(valor)
+        if isinstance(convertido, (int, float)):
+            return float(convertido)
+    return None
+
+
+def normalizar_resultado(valor: Any) -> str | None:
+    if valor is None:
+        return None
+
+    texto = str(valor).strip()
+    if not texto:
+        return None
+
+    texto = unicodedata.normalize("NFKD", texto)
+    texto = "".join(char for char in texto if not unicodedata.combining(char))
+    return texto.upper()
+
+
+def chave_sessao_para_noite(registro: dict[str, Any]) -> int | str:
+    for chave in ("sessao_treino_log", "run"):
+        valor = para_inteiro(registro.get(chave))
+        if valor is not None:
+            return valor
+    return "sessao_unica"
+
+
+def enriquecer_registros_episodios(registros: list[dict[str, Any]]) -> None:
+    noite_por_sessao: dict[int | str, int] = {}
+
+    for registro in registros:
+        if "resultado" not in registro and "result" in registro:
+            registro["resultado"] = registro.get("result")
+
+        if "sessao_treino_log" not in registro and "run" in registro:
+            run = para_inteiro(registro.get("run"))
+            if run is not None:
+                registro["sessao_treino_log"] = run
+
+        if "tempo_ep_minutos" not in registro:
+            for chave_tempo in (
+                "tempo_minutos",
+                "tempo_ep_min",
+                "tempo_em_minutos",
+                "duracao_minutos",
+            ):
+                valor_tempo = para_float(registro.get(chave_tempo))
+                if valor_tempo is not None:
+                    registro["tempo_ep_minutos"] = valor_tempo
+                    break
+        else:
+            valor_tempo = para_float(registro.get("tempo_ep_minutos"))
+            if valor_tempo is not None:
+                registro["tempo_ep_minutos"] = valor_tempo
+
+        if para_inteiro(registro.get("ep")) is None:
+            continue
+
+        chave_sessao = chave_sessao_para_noite(registro)
+        noite_atual = noite_por_sessao.get(chave_sessao, 1)
+        registro["noite"] = noite_atual
+
+        resultado_normalizado = normalizar_resultado(registro.get("resultado"))
+        if resultado_normalizado is not None:
+            registro["resultado"] = resultado_normalizado
+
+        if resultado_normalizado in RESULTADOS_QUE_AVANCAM_NOITE:
+            noite_por_sessao[chave_sessao] = noite_atual + 1
+        else:
+            noite_por_sessao[chave_sessao] = noite_atual
+
+
 def ler_csv_episodios(caminho: Path) -> tuple[list[dict[str, Any]], str | None]:
     registros: list[dict[str, Any]] = []
     with caminho.open("r", encoding="utf-8", newline="") as arquivo:
@@ -116,12 +215,14 @@ def ler_log_treino(caminho: Path) -> tuple[list[dict[str, Any]], str | None]:
     registros: list[dict[str, Any]] = []
     pc_detectado: str | None = None
     sessao_treino_atual = 0
+    sessao_pendente = False
 
     with caminho.open("r", encoding="utf-8", errors="ignore") as arquivo:
         for linha in arquivo:
             linha = linha.strip()
             if TREINO_INICIADO_PATTERN.match(linha):
-                sessao_treino_atual += 1
+                # So avanca sessao quando aparecer o primeiro episodio da nova sessao.
+                sessao_pendente = True
                 continue
 
             match = LOG_PATTERN.match(linha)
@@ -131,6 +232,10 @@ def ler_log_treino(caminho: Path) -> tuple[list[dict[str, Any]], str | None]:
             if sessao_treino_atual == 0:
                 # Compatibilidade com logs sem cabecalho "Treino iniciado".
                 sessao_treino_atual = 1
+                sessao_pendente = False
+            elif sessao_pendente:
+                sessao_treino_atual += 1
+                sessao_pendente = False
 
             pc_linha = (match.group("pc") or "").strip()
             if pc_detectado is None and pc_linha:
@@ -144,6 +249,10 @@ def ler_log_treino(caminho: Path) -> tuple[list[dict[str, Any]], str | None]:
                 "recompensa": float(match.group("recompensa").replace(",", ".")),
                 "taxa_vitoria": float(match.group("taxa").replace(",", ".")),
             }
+            tempo_minutos = match.group("tempo_minutos")
+            if tempo_minutos is not None:
+                registro["tempo_ep_minutos"] = float(tempo_minutos.replace(",", "."))
+
             if pc_linha:
                 registro["pc"] = pc_linha
 
@@ -392,6 +501,8 @@ def main() -> None:
             f"Nenhum registro valido encontrado em {caminho}. "
             "Verifique o formato do log."
         )
+
+    enriquecer_registros_episodios(registros)
 
     if args.max_registros and args.max_registros > 0:
         registros = registros[-args.max_registros :]

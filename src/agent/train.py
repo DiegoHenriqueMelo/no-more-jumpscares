@@ -39,6 +39,7 @@ class LogCallback(BaseCallback):
         self.mortes           = 0
         self.vitorias         = 0
         self.recompensa_total = 0.0
+        self.inicio_ep        = None
 
         os.makedirs("logs", exist_ok=True)
         self.arquivo_log = open("logs/treino.log", "a", encoding="utf-8")
@@ -50,11 +51,22 @@ class LogCallback(BaseCallback):
             print("PAUSADO — solte F12 para continuar...", end="\r")
             time.sleep(0.5)
 
+        if self.inicio_ep is None:
+            # Marca o inicio real do episodio para calcular duracao em minutos.
+            self.inicio_ep = time.perf_counter()
+
         info = self.locals.get("infos", [{}])[0]
         self.recompensa_total += self.locals.get("rewards", [0])[0]
 
         done = self.locals.get("dones", [False])[0]
         if done:
+            agora = time.perf_counter()
+            tempo_ep_minutos = (
+                (agora - self.inicio_ep) / 60.0
+                if self.inicio_ep is not None
+                else 0.0
+            )
+
             self.episodio += 1
 
             if info.get("morreu", False):
@@ -67,10 +79,11 @@ class LogCallback(BaseCallback):
             taxa_vitoria = (self.vitorias / self.episodio) * 100
 
             linha = (
-                f"{_env_str_obrigatorio("PC")} | "
+                f"{_env_str_obrigatorio('PC')} | "
                 f"Ep {self.episodio:4d} | "
                 f"{resultado:8s} | "
                 f"Passos: {info.get('passos', 0):6d} | "
+                f"Tempo: {tempo_ep_minutos:7.2f} min | "
                 f"Recompensa: {self.recompensa_total:8.1f} | "
                 f"Taxa vitória: {taxa_vitoria:.1f}%"
             )
@@ -79,6 +92,7 @@ class LogCallback(BaseCallback):
             self.arquivo_log.write(linha + "\n")
             self.arquivo_log.flush()
             self.recompensa_total = 0.0
+            self.inicio_ep = None
 
         return True
 
