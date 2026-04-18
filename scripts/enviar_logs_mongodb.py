@@ -68,29 +68,34 @@ def carregar_env(caminho: Path = Path(".env")) -> None:
             os.environ[chave] = valor
 
 
-def detectar_fonte_log() -> Path:
+def detectar_fontes_log() -> list[Path]:
     candidatos = [
         Path("logs/treino.log.txt"),
         Path("logs/treino.log"),
         Path("logs_analysis/episodes.csv"),
     ]
 
-    for candidato in candidatos:
-        if candidato.exists():
-            return candidato
+    fontes = [candidato for candidato in candidatos if candidato.exists()]
 
     eventos = sorted(
         Path("logs").rglob("events.out.tfevents*"),
         key=lambda caminho: caminho.stat().st_mtime,
         reverse=True,
     )
-    if eventos:
-        return eventos[0]
+    fontes.extend(eventos)
+
+    if fontes:
+        return fontes
 
     raise FileNotFoundError(
         "Nenhum log encontrado. Esperado: logs/treino.log.txt, logs/treino.log, "
         "logs_analysis/episodes.csv ou logs/**/events.out.tfevents*"
     )
+
+
+def detectar_fonte_log() -> Path:
+    fontes = detectar_fontes_log()
+    return fontes[0]
 
 
 def para_numero(valor: str) -> int | float | str | None:
@@ -390,6 +395,18 @@ def aplicar_offset_sessao_treino_log(
             registro["sessao_treino_log"] = int(valor) + offset
 
 
+def resumir_erro(erro: Exception, limite: int = 170) -> str:
+    texto = str(erro).replace("\n", " ").strip()
+    marcador_topologia = "Topology Description:"
+    if marcador_topologia in texto:
+        texto = texto.split(marcador_topologia, 1)[0].strip().rstrip(",")
+
+    if len(texto) > limite:
+        texto = texto[: limite - 3].rstrip() + "..."
+
+    return f"{erro.__class__.__name__}: {texto}"
+
+
 def gerar_sessao_treino_id() -> str:
     base = (
         os.getenv("WT_SESSION")
@@ -483,6 +500,16 @@ def criar_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Exibe preview do(s) documento(s) JSON no terminal.",
     )
+    parser.add_argument(
+        "--strict-db-error",
+        action="store_true",
+        help="Se definido, falhas de conexao/envio ao MongoDB geram erro e traceback.",
+    )
+    parser.add_argument(
+        "--verbose-errors",
+        action="store_true",
+        help="Exibe detalhes completos dos erros em vez de resumo curto.",
+    )
     return parser
 
 
@@ -491,16 +518,26 @@ def main() -> None:
     parser = criar_parser()
     args = parser.parse_args()
 
-    caminho = args.source if args.source else detectar_fonte_log()
-    if not caminho.exists():
-        raise FileNotFoundError(f"Arquivo de log nao encontrado: {caminho}")
+    caminhos_candidatos = [args.source] if args.source else detectar_fontes_log()
+    for candidato in caminhos_candidatos:
+        if not candidato.exists():
+            continue
 
-    registros, pc_detectado, _tipo_origem = ler_registros(caminho)
-    if not registros:
-        raise RuntimeError(
-            f"Nenhum registro valido encontrado em {caminho}. "
-            "Verifique o formato do log."
+        registros, pc_detectado, _tipo_origem = ler_registros(candidato)
+        if registros:
+            caminho = candidato
+            break
+    else:
+        origem = (
+            args.source.as_posix()
+            if args.source is not None
+            else "deteccao automatica (treino.log/treino.log.txt/csv/tfevents)"
         )
+        print(
+            "Nenhum registro valido encontrado na origem informada "
+            f"({origem}). Nada para enviar."
+        )
+        return
 
     enriquecer_registros_episodios(registros)
 
@@ -518,10 +555,17 @@ def main() -> None:
                 )
                 aplicar_offset_sessao_treino_log(registros, ultimo_banco)
             except Exception as erro:
-                print(
-                    "Aviso: nao foi possivel basear sessao_treino_log no banco. "
-                    f"Mantendo numeracao local. Motivo: {erro}"
-                )
+                if args.verbose_errors:
+                    detalhe_erro = str(erro)
+                    print(
+                        "Aviso: nao foi possivel basear sessao_treino_log no banco. "
+                        f"Mantendo numeracao local. Motivo: {detalhe_erro}"
+                    )
+                else:
+                    print(
+                        "Aviso: nao foi possivel basear sessao_treino_log no banco. "
+                        "Mantendo numeracao local."
+                    )
         else:
             print(
                 "Aviso: MONGO_URI ausente, sessao_treino_log sera baseada "
@@ -571,12 +615,25 @@ def main() -> None:
             "Mongo URI ausente. Passe --uri ou configure MONGO_URI no .env"
         )
 
-    inserted_ids = enviar_para_mongodb(
-        documentos=documentos,
-        uri=uri,
-        database=args.database,
-        collection=args.collection,
-    )
+    try:
+        inserted_ids = enviar_para_mongodb(
+            documentos=documentos,
+            uri=uri,
+            database=args.database,
+            collection=args.collection,
+        )
+    except Exception as erro:
+        detalhe_erro = str(erro) if args.verbose_errors else resumir_erro(erro)
+        mensagem = "Falha ao enviar para MongoDB. Nada foi enviado nesta execucao."
+        if args.verbose_errors:
+            mensagem = f"{mensagem} Motivo: {detalhe_erro}"
+        else:
+            mensagem = f"{mensagem} Motivo: {detalhe_erro}"
+        if args.strict_db_error:
+            raise RuntimeError(mensagem) from erro
+
+        print(f"Aviso: {mensagem}")
+        return
 
     log_foi_limpo = limpar_log_textual(caminho, _tipo_origem)
 

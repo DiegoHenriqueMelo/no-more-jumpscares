@@ -40,6 +40,7 @@ class LogCallback(BaseCallback):
         self.vitorias         = 0
         self.recompensa_total = 0.0
         self.inicio_ep        = None
+        self._pausa_disponivel = True
 
         os.makedirs("logs", exist_ok=True)
         self.arquivo_log = open("logs/treino.log", "a", encoding="utf-8")
@@ -47,9 +48,17 @@ class LogCallback(BaseCallback):
 
     def _on_step(self) -> bool:
         # F12 pausa a IA — segura para pausar, larga para continuar
-        while keyboard.is_pressed("F12"):
-            print("PAUSADO — solte F12 para continuar...", end="\r")
-            time.sleep(0.5)
+        if self._pausa_disponivel:
+            try:
+                while keyboard.is_pressed("F12"):
+                    print("PAUSADO — solte F12 para continuar...", end="\r")
+                    time.sleep(0.5)
+            except Exception as erro:
+                print(
+                    "Aviso: pausa por F12 desativada nesta execucao. "
+                    f"Motivo: {erro}"
+                )
+                self._pausa_disponivel = False
 
         if self.inicio_ep is None:
             # Marca o inicio real do episodio para calcular duracao em minutos.
@@ -132,19 +141,27 @@ def treinar(timesteps: int = 500_000, carregar_modelo: str = None):
         save_path=PASTA_MODELOS,
         name_prefix=f"{_env_str_obrigatorio('PC')}_fnaf_ppo",
     )
+    log_callback = LogCallback()
 
     print(f"Treinando por {timesteps:,} timesteps...\n")
-    modelo.learn(
-        total_timesteps=timesteps,
-        callback=[checkpoint, LogCallback()],
-        reset_num_timesteps=carregar_modelo is None,
-    )
+    try:
+        modelo.learn(
+            total_timesteps=timesteps,
+            callback=[checkpoint, log_callback],
+            reset_num_timesteps=carregar_modelo is None,
+        )
+    except KeyboardInterrupt:
+        print("\nTreino interrompido pelo usuario. Salvando estado atual...")
+    finally:
+        if not log_callback.arquivo_log.closed:
+            log_callback.arquivo_log.write("Treino finalizado\n")
+            log_callback.arquivo_log.close()
 
-    caminho_final = f"{PASTA_MODELOS}/fnaf_ppo_final"
-    modelo.save(caminho_final)
-    print(f"\nModelo final salvo em: {caminho_final}")
+        caminho_final = f"{PASTA_MODELOS}/fnaf_ppo_final"
+        modelo.save(caminho_final)
+        print(f"\nModelo final salvo em: {caminho_final}")
 
-    env.close()
+        env.close()
 
 
 if __name__ == "__main__":
