@@ -48,6 +48,13 @@ ACOES = {
     16: "camera_7",
 }
 
+ACOES_CAMERA = {acao for acao in ACOES.values() if acao.startswith("camera_")}
+ACOES_LADO_ESQUERDO = {"porta_esquerda", "luz_esquerda"}
+ACOES_LADO_DIREITO = {"porta_direita", "luz_direita", "abrir_fechar_camera"} | ACOES_CAMERA
+
+LADO_POR_ACAO = {acao: "esquerdo" for acao in ACOES_LADO_ESQUERDO}
+LADO_POR_ACAO.update({acao: "direito" for acao in ACOES_LADO_DIREITO})
+
 def _env_int_obrigatorio(nome: str) -> int:
     valor = os.getenv(nome)
     if valor is None or valor.strip() == "":
@@ -65,6 +72,22 @@ def _env_str_obrigatorio(nome: str) -> str:
     return valor.strip()
 
 
+def _env_float_opcional(nome: str, padrao: float) -> float:
+    valor = os.getenv(nome)
+    if valor is None or valor.strip() == "":
+        return padrao
+
+    try:
+        convertido = float(valor)
+    except ValueError:
+        raise ValueError(f"Valor invalido para {nome}: {valor}")
+
+    if convertido < 0:
+        raise ValueError(f"Valor invalido para {nome}: {valor}. Use numero >= 0")
+
+    return convertido
+
+
 def _env_coord(acao: str) -> tuple[int, int]:
     prefixo = f"FNAF_COORD_{acao.upper()}".replace("-", "_")
     x = _env_int_obrigatorio(f"{prefixo}_X")
@@ -77,6 +100,8 @@ RESET_CLICK = (
     _env_int_obrigatorio("FNAF_RESET_CLICK_X"),
     _env_int_obrigatorio("FNAF_RESET_CLICK_Y"),
 )
+STEP_DELAY = _env_float_opcional("FNAF_STEP_DELAY", 0.30)
+SIDE_SWITCH_DELAY = _env_float_opcional("FNAF_SIDE_SWITCH_DELAY", 0.12)
 
 COORDS = {
     acao: _env_coord(acao)
@@ -109,6 +134,7 @@ class FNAFEnv(gym.Env):
         self.porta_esq = False
         self.porta_dir = False
         self.vivo      = True
+        self.lado_atual = None
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -118,6 +144,7 @@ class FNAFEnv(gym.Env):
         self.porta_esq        = False
         self.porta_dir        = False
         self.vivo             = True
+        self.lado_atual       = None
         self.contador_vitoria = 0
 
         self.capture.focar_janela(WINDOW_TITLE)
@@ -135,7 +162,7 @@ class FNAFEnv(gym.Env):
     def step(self, acao: int):
         self.passos += 1
         self._executar_acao(acao)
-        time.sleep(0.25)
+        time.sleep(STEP_DELAY)
 
         observacao = self._capturar_observacao()
         morreu     = self._detectar_morte()
@@ -156,6 +183,7 @@ class FNAFEnv(gym.Env):
 
     def _executar_acao(self, acao: int):
         nome_acao = ACOES[acao]
+        lado_alvo = LADO_POR_ACAO.get(nome_acao)
 
         if nome_acao == "nada":
             return
@@ -168,7 +196,17 @@ class FNAFEnv(gym.Env):
 
         if nome_acao in COORDS:
             x, y = COORDS[nome_acao]
+
+            # Ao trocar de lado, move antes e espera um pouco para o jogo
+            # finalizar a transicao de camera antes do clique real.
+            if lado_alvo and self.lado_atual and lado_alvo != self.lado_atual:
+                self.capture.mover_mouse(x, y)
+                time.sleep(SIDE_SWITCH_DELAY)
+
             self.capture.clicar(x, y)
+
+            if lado_alvo:
+                self.lado_atual = lado_alvo
 
     def _calcular_recompensa(self, morreu: bool, sobreviveu: bool, acao: int) -> float:
         if morreu:
