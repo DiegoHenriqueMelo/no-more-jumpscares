@@ -67,7 +67,7 @@ class LogCallback(BaseCallback):
             taxa_vitoria = (self.vitorias / self.episodio) * 100
 
             linha = (
-                f"{_env_str_obrigatorio("PC")} | "
+                f"{_env_str_obrigatorio('PC')} | "
                 f"Ep {self.episodio:4d} | "
                 f"{resultado:8s} | "
                 f"Passos: {info.get('passos', 0):6d} | "
