@@ -108,6 +108,7 @@ class FNAFEnv(gym.Env):
         self.energia   = 100.0
         self.porta_esq = False
         self.porta_dir = False
+        self.camera_aberta = False
         self.vivo      = True
 
     def reset(self, seed=None, options=None):
@@ -117,6 +118,7 @@ class FNAFEnv(gym.Env):
         self.energia          = 100.0
         self.porta_esq        = False
         self.porta_dir        = False
+        self.camera_aberta    = False
         self.vivo             = True
         self.contador_vitoria = 0
 
@@ -149,6 +151,7 @@ class FNAFEnv(gym.Env):
             "energia":   self.energia,
             "porta_esq": self.porta_esq,
             "porta_dir": self.porta_dir,
+            "camera_aberta": self.camera_aberta,
             "morreu":    morreu,
         }
 
@@ -165,6 +168,9 @@ class FNAFEnv(gym.Env):
 
         if nome_acao == "porta_direita":
             self.porta_dir = not self.porta_dir
+
+        if nome_acao == "abrir_fechar_camera":
+            self.camera_aberta = not self.camera_aberta
 
         if nome_acao in COORDS:
             x, y = COORDS[nome_acao]
@@ -185,6 +191,23 @@ class FNAFEnv(gym.Env):
 
         if nome_acao in ["luz_esquerda", "luz_direita"]:
             recompensa -= 0.3
+
+        if nome_acao == "abrir_fechar_camera" and self.camera_aberta:
+            recompensa += 0.8
+            
+        if nome_acao in ["camera_1a",
+"camera_1b",
+"camera_1c",
+"camera_2a",
+"camera_2b",
+"camera_3",
+"camera_4a",
+"camera_4b",
+"camera_5",
+"camera_6",
+"camera_7",]:
+            recompensa -= 0.5
+
 
         if self.porta_esq and self.porta_dir:
             recompensa -= 2.0

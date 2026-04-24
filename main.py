@@ -15,8 +15,8 @@ def modo_treino():
 
     # Prioriza o modelo merged se existir
     if os.path.exists("modelos/fnaf_merged.zip"):
-        ultimo_modelo = "modelos/fnaf_merged.zip"
-        print(f"Usando modelo merged!")
+        ultimo_modelo = "modelos/pc2_fnaf_ppo_80000_steps.zip"
+        print(f"Usando modelopc2_fnaf_ppo_80000_steps!")
     else:
         modelos = glob.glob("modelos/*.zip")
         ultimo_modelo = max(modelos, key=os.path.getctime) if modelos else None
