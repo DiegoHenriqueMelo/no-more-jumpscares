@@ -60,11 +60,11 @@ LADO_POR_ACAO.update({acao: "direito" for acao in ACOES_LADO_DIREITO})
 def _env_int_obrigatorio(nome: str) -> int:
     valor = os.getenv(nome)
     if valor is None or valor.strip() == "":
-        raise ValueError(f"Variavel obrigatoria ausente no .env: {nome}")
+        return 0
     try:
         return int(valor)
     except ValueError:
-        raise ValueError(f"Valor invalido para {nome}: {valor}")
+        return 0
 
 
 def _env_int_opcional(nome: str, padrao: int) -> int:
@@ -80,7 +80,7 @@ def _env_int_opcional(nome: str, padrao: int) -> int:
 def _env_str_obrigatorio(nome: str) -> str:
     valor = os.getenv(nome)
     if valor is None or valor.strip() == "":
-        raise ValueError(f"Variavel obrigatoria ausente no .env: {nome}")
+        return ""
     return valor.strip()
 
 
@@ -122,8 +122,9 @@ RESET_CLICK = (
     _env_int_obrigatorio("FNAF_RESET_CLICK_X"),
     _env_int_obrigatorio("FNAF_RESET_CLICK_Y"),
 )
-STEP_DELAY = _env_float_opcional("FNAF_STEP_DELAY", 0.30)
+STEP_DELAY = _env_float_opcional("FNAF_STEP_DELAY", 0.25)
 SIDE_SWITCH_DELAY = _env_float_opcional("FNAF_SIDE_SWITCH_DELAY", 0.12)
+CAMERA_EXIT_DELAY = _env_float_opcional("FNAF_CAMERA_EXIT_DELAY", 0.5)
 
 COORDS = {
     acao: _env_coord(acao)
@@ -157,6 +158,7 @@ class FNAFEnv(gym.Env):
         self.porta_dir = False
         self.vivo      = True
         self.lado_atual = None
+        self.ultima_acao = None
 
     def _janela_do_jogo_aberta(self) -> bool:
         import pygetwindow as gw
@@ -427,12 +429,19 @@ class FNAFEnv(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
 
+        if not WINDOW_TITLE:
+            raise RuntimeError(
+                "FNAF_WINDOW_TITLE nao configurado no .env. "
+                "Configure as variaveis obrigatorias antes de executar."
+            )
+
         self.passos           = 0
         self.energia          = 100.0
         self.porta_esq        = False
         self.porta_dir        = False
         self.vivo             = True
         self.lado_atual       = None
+        self.ultima_acao      = None
         self.contador_vitoria = 0
 
         if not self._janela_do_jogo_aberta():
@@ -505,11 +514,17 @@ class FNAFEnv(gym.Env):
             if lado_alvo and self.lado_atual and lado_alvo != self.lado_atual:
                 self.capture.mover_mouse(x, y)
                 time.sleep(SIDE_SWITCH_DELAY)
+            # Ao sair das cameras para luz/porta direita, espera para a camera acompanhar
+            elif self.ultima_acao in ACOES_CAMERA and nome_acao in {"luz_direita", "porta_direita"}:
+                self.capture.mover_mouse(x, y)
+                time.sleep(CAMERA_EXIT_DELAY)
 
             self.capture.clicar(x, y)
 
             if lado_alvo:
                 self.lado_atual = lado_alvo
+
+        self.ultima_acao = nome_acao
 
     def _calcular_recompensa(self, morreu: bool, sobreviveu: bool, acao: int) -> float:
         if morreu:
