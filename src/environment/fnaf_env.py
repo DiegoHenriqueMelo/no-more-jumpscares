@@ -175,7 +175,7 @@ class FNAFEnv(gym.Env):
             return -100.0
 
         if sobreviveu:
-            return +500.0
+            return +1000.0
 
         recompensa = +1.0
         nome_acao  = ACOES[acao]
