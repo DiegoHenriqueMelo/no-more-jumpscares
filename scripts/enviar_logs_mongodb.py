@@ -197,8 +197,11 @@ def enriquecer_registros_episodios(registros: list[dict[str, Any]]) -> None:
 
         if resultado_normalizado in RESULTADOS_QUE_AVANCAM_NOITE:
             noite_por_sessao[chave_sessao] = noite_atual + 1
-        else:
+        elif resultado_normalizado is None:
             noite_por_sessao[chave_sessao] = noite_atual
+        else:
+            # Em resultado nao-vitorioso, o jogo reinicia na noite 1.
+            noite_por_sessao[chave_sessao] = 1
 
 
 def ler_csv_episodios(caminho: Path) -> tuple[list[dict[str, Any]], str | None]:
