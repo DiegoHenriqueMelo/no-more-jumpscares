@@ -144,21 +144,37 @@ class FNAFEnv(gym.Env):
         self.contador_vitoria = 0
         self._carregar_templates()
 
-        self.observation_space = spaces.Box(
-            low=0, high=255,
-            shape=(ALTURA, LARGURA, 1),
-            dtype=np.uint8
-        )
+        self.observation_space = spaces.Dict({
+            "imagem": spaces.Box(
+                low=0, high=255,
+                shape=(ALTURA, LARGURA, 1),
+                dtype=np.uint8
+            ),
+            "estados": spaces.Box(
+                low=0, high=1,
+                shape=(7,),
+                dtype=np.float32
+            )
+        })
         self.action_space = spaces.Discrete(len(ACOES))
 
         self.passos    = 0
         self.max_passos = 10_000
         self.energia   = 100.0
+        self.tempo_jogo = 0.0
+        self.luz_esq = False
+        self.luz_dir = False
+        self.luz_esq_timer = 0
+        self.luz_dir_timer = 0
         self.porta_esq = False
         self.porta_dir = False
+        self.camera_aberta = False
+        self.camera_ativa = 0
         self.vivo      = True
         self.lado_atual = None
         self.ultima_acao = None
+        self.penultima_acao = None
+        self.ultimo_update_energia = None
 
     def _janela_do_jogo_aberta(self) -> bool:
         import pygetwindow as gw
@@ -285,145 +301,17 @@ class FNAFEnv(gym.Env):
             "energia": self.energia,
             "porta_esq": self.porta_esq,
             "porta_dir": self.porta_dir,
+            "camera_aberta": self.camera_aberta,
+            "camera_ativa": self.camera_ativa,
             "morreu": False,
             "interrompido": True,
             "ocorrido": motivo,
         }
 
-        observacao = np.zeros((ALTURA, LARGURA, 1), dtype=np.uint8)
-        return observacao, 0.0, True, False, info
-
-    def _janela_do_jogo_aberta(self) -> bool:
-        import pygetwindow as gw
-        return bool(gw.getWindowsWithTitle(WINDOW_TITLE))
-
-    @staticmethod
-    def _normalizar_texto(texto: str) -> str:
-        texto = unicodedata.normalize("NFKD", texto)
-        texto = "".join(char for char in texto if not unicodedata.combining(char))
-        return texto.lower()
-
-    @staticmethod
-    def _caminhos_desktop() -> list[Path]:
-        candidatos = [
-            Path.home() / "Desktop",
-            Path(os.getenv("USERPROFILE", "")) / "Desktop",
-            Path(os.getenv("PUBLIC", "")) / "Desktop",
-        ]
-
-        one_drive = os.getenv("OneDrive")
-        if one_drive:
-            candidatos.append(Path(one_drive) / "Desktop")
-
-        unicos: list[Path] = []
-        vistos: set[str] = set()
-        for caminho in candidatos:
-            chave = str(caminho).strip().lower()
-            if not chave or chave in vistos:
-                continue
-            vistos.add(chave)
-            unicos.append(caminho)
-        return unicos
-
-    def _descobrir_atalho_desktop(self) -> Path | None:
-        palavras_chave = ("five nights", "freddy", "fnaf")
-        extensoes_validas = {".lnk", ".url", ".exe"}
-
-        for desktop in self._caminhos_desktop():
-            if not desktop.exists() or not desktop.is_dir():
-                continue
-
-            arquivos = sorted(
-                [arquivo for arquivo in desktop.iterdir() if arquivo.is_file()],
-                key=lambda item: item.name.lower(),
-            )
-
-            for arquivo in arquivos:
-                if arquivo.suffix.lower() not in extensoes_validas:
-                    continue
-
-                nome_normalizado = self._normalizar_texto(arquivo.stem)
-                if any(chave in nome_normalizado for chave in palavras_chave):
-                    return arquivo
-
-        return None
-
-    def _resolver_caminho_jogo(self) -> Path | None:
-        if GAME_EXECUTABLE_PATH:
-            texto_expandido = os.path.expandvars(os.path.expanduser(GAME_EXECUTABLE_PATH))
-            caminho = Path(texto_expandido)
-            if caminho.exists() and caminho.is_file():
-                return caminho
-
-            nome_apenas = Path(GAME_EXECUTABLE_PATH).name
-            for desktop in self._caminhos_desktop():
-                candidato = desktop / nome_apenas
-                if candidato.exists() and candidato.is_file():
-                    return candidato
-
-            print(
-                "[FALLBACK] Caminho invalido em FNAF_EXECUTABLE_PATH: "
-                f"{GAME_EXECUTABLE_PATH}"
-            )
-
-        encontrado = self._descobrir_atalho_desktop()
-        if encontrado is not None:
-            print(f"[FALLBACK] Usando atalho detectado na area de trabalho: {encontrado}")
-        return encontrado
-
-    @staticmethod
-    def _abrir_arquivo(path_arquivo: Path) -> bool:
-        try:
-            if os.name == "nt":
-                os.startfile(str(path_arquivo))
-            else:
-                subprocess.Popen([str(path_arquivo)], cwd=str(path_arquivo.parent))
-            return True
-        except Exception:
-            return False
-
-    def _abrir_jogo_fallback(self) -> bool:
-        caminho = self._resolver_caminho_jogo()
-        if caminho is None:
-            print(
-                "[FALLBACK] Nao foi encontrado executavel/atalho do jogo. "
-                "Configure FNAF_EXECUTABLE_PATH com .exe ou .lnk."
-            )
-            return False
-
-        if not self._abrir_arquivo(caminho):
-            print(f"[FALLBACK] Falha ao abrir jogo automaticamente: {caminho}")
-            return False
-
-        print("[FALLBACK] Jogo fechado detectado. Relancando executavel...")
-        time.sleep(REABRIR_ESPERA_SEGUNDOS)
-
-        if not self.capture.focar_janela(WINDOW_TITLE):
-            print("[FALLBACK] Janela nao encontrada apos relancamento.")
-            return False
-
-        self.capture.atalho("alt", "enter")
-        time.sleep(POS_ALT_ENTER_ESPERA_SEGUNDOS)
-        self.capture.focar_janela(WINDOW_TITLE)
-        print("[FALLBACK] Jogo recolocado em modo janela (ALT+ENTER).")
-        return True
-
-    def _interromper_episodio(self, motivo: str):
-        recuperado = self._abrir_jogo_fallback()
-        if not recuperado:
-            motivo = f"{motivo} (fallback sem sucesso)"
-
-        info = {
-            "passos": self.passos,
-            "energia": self.energia,
-            "porta_esq": self.porta_esq,
-            "porta_dir": self.porta_dir,
-            "morreu": False,
-            "interrompido": True,
-            "ocorrido": motivo,
+        observacao = {
+            "imagem": np.zeros((ALTURA, LARGURA, 1), dtype=np.uint8),
+            "estados": np.zeros(7, dtype=np.float32)
         }
-
-        observacao = np.zeros((ALTURA, LARGURA, 1), dtype=np.uint8)
         return observacao, 0.0, True, False, info
 
     def reset(self, seed=None, options=None):
@@ -437,12 +325,21 @@ class FNAFEnv(gym.Env):
 
         self.passos           = 0
         self.energia          = 100.0
+        self.tempo_jogo       = 0.0
+        self.luz_esq          = False
+        self.luz_dir          = False
+        self.luz_esq_timer    = 0
+        self.luz_dir_timer    = 0
         self.porta_esq        = False
         self.porta_dir        = False
+        self.camera_aberta    = False
+        self.camera_ativa     = 0
         self.vivo             = True
         self.lado_atual       = None
         self.ultima_acao      = None
+        self.penultima_acao   = None
         self.contador_vitoria = 0
+        self.ultimo_update_energia = time.perf_counter()
 
         if not self._janela_do_jogo_aberta():
             self._abrir_jogo_fallback()
@@ -469,8 +366,35 @@ class FNAFEnv(gym.Env):
         if not self._janela_do_jogo_aberta():
             return self._interromper_episodio("janela do jogo nao encontrada")
 
-        self._executar_acao(acao)
+        # Se energia acabou, desliga tudo e aguarda morte
+        if self.energia <= 0:
+            self.porta_esq = False
+            self.porta_dir = False
+            self.luz_esq = False
+            self.luz_dir = False
+            self.camera_aberta = False
+            # Continua por alguns steps até detectar morte
+            time.sleep(STEP_DELAY)
+            try:
+                observacao = self._capturar_observacao()
+                morreu = self._detectar_morte()
+            except Exception as erro:
+                return self._interromper_episodio(f"falha ao capturar estado: {erro}")
+            
+            return observacao, -500.0, True, False, {
+                "passos": self.passos,
+                "energia": 0.0,
+                "tempo": self.tempo_jogo,
+                "morreu": True,
+                "sem_energia": True,
+            }
+
+        acao_valida = self._executar_acao(acao)
         time.sleep(STEP_DELAY)
+        
+        self._atualizar_luzes()
+        self._atualizar_energia()
+        self._atualizar_tempo()
 
         try:
             observacao = self._capturar_observacao()
@@ -479,32 +403,69 @@ class FNAFEnv(gym.Env):
         except Exception as erro:
             return self._interromper_episodio(f"falha ao capturar estado: {erro}")
 
-        recompensa = self._calcular_recompensa(morreu, sobreviveu, acao)
+        recompensa = self._calcular_recompensa(morreu, sobreviveu, acao, acao_valida)
         terminado  = morreu or sobreviveu
         truncado   = self.passos >= self.max_passos
 
         info = {
-            "passos":    self.passos,
-            "energia":   self.energia,
-            "porta_esq": self.porta_esq,
-            "porta_dir": self.porta_dir,
-            "morreu":    morreu,
+            "passos":         self.passos,
+            "energia":        self.energia,
+            "tempo":          self.tempo_jogo,
+            "luz_esq":        self.luz_esq,
+            "luz_dir":        self.luz_dir,
+            "porta_esq":      self.porta_esq,
+            "porta_dir":      self.porta_dir,
+            "camera_aberta":  self.camera_aberta,
+            "camera_ativa":   self.camera_ativa,
+            "morreu":         morreu,
+            "acao_valida":    acao_valida,
         }
 
         return observacao, recompensa, terminado, truncado, info
 
-    def _executar_acao(self, acao: int):
+    def _executar_acao(self, acao: int) -> bool:
+        """Executa ação e retorna True se teve efeito, False se foi inválida."""
         nome_acao = ACOES[acao]
         lado_alvo = LADO_POR_ACAO.get(nome_acao)
 
         if nome_acao == "nada":
-            return
+            self.penultima_acao = self.ultima_acao
+            self.ultima_acao = nome_acao
+            return True
 
-        if nome_acao == "porta_esquerda":
-            self.porta_esq = not self.porta_esq
+        # Ações de porta/luz só funcionam quando NÃO está na câmera
+        if nome_acao in ["porta_esquerda", "porta_direita", "luz_esquerda", "luz_direita"]:
+            if self.camera_aberta:
+                return False  # Ação inválida - está na câmera
+            
+            if nome_acao == "porta_esquerda":
+                self.porta_esq = not self.porta_esq
+            elif nome_acao == "porta_direita":
+                self.porta_dir = not self.porta_dir
+            elif nome_acao == "luz_esquerda":
+                self.luz_esq = True
+                self.luz_esq_timer = 1  # Desliga após 1 step
+            elif nome_acao == "luz_direita":
+                self.luz_dir = True
+                self.luz_dir_timer = 1  # Desliga após 1 step
 
-        if nome_acao == "porta_direita":
-            self.porta_dir = not self.porta_dir
+        # Abrir/fechar câmera sempre funciona
+        elif nome_acao == "abrir_fechar_camera":
+            self.camera_aberta = not self.camera_aberta
+            if not self.camera_aberta:
+                self.camera_ativa = 0
+            # Ao abrir câmera, desliga luzes (não fazem sentido no contexto)
+            if self.camera_aberta:
+                self.luz_esq = False
+                self.luz_dir = False
+                self.luz_esq_timer = 0
+                self.luz_dir_timer = 0
+
+        # Trocar de câmera só funciona se câmera estiver aberta
+        elif nome_acao.startswith("camera_"):
+            if not self.camera_aberta:
+                return False  # Ação inválida - câmera fechada
+            self.camera_ativa = acao - 5
 
         if nome_acao in COORDS:
             x, y = COORDS[nome_acao]
@@ -524,35 +485,125 @@ class FNAFEnv(gym.Env):
             if lado_alvo:
                 self.lado_atual = lado_alvo
 
+        self.penultima_acao = self.ultima_acao
         self.ultima_acao = nome_acao
+        return True
 
-    def _calcular_recompensa(self, morreu: bool, sobreviveu: bool, acao: int) -> float:
+    def _atualizar_luzes(self):
+        """Luzes desligam automaticamente após 1 step (comportamento realista)."""
+        if self.luz_esq_timer > 0:
+            self.luz_esq_timer -= 1
+            if self.luz_esq_timer == 0:
+                self.luz_esq = False
+        
+        if self.luz_dir_timer > 0:
+            self.luz_dir_timer -= 1
+            if self.luz_dir_timer == 0:
+                self.luz_dir = False
+    
+    def _atualizar_energia(self):
+        agora = time.perf_counter()
+        if self.ultimo_update_energia is None:
+            self.ultimo_update_energia = agora
+            return
+        
+        dt = agora - self.ultimo_update_energia
+        
+        usage = 1
+        usage += int(self.porta_esq)
+        usage += int(self.porta_dir)
+        usage += int(self.luz_esq)
+        usage += int(self.luz_dir)
+        usage += int(self.camera_aberta)
+        usage = min(usage, 4)
+        
+        consumo_por_segundo = usage * 0.1
+        self.energia -= consumo_por_segundo * dt
+        self.energia = max(0.0, self.energia)
+        
+        self.ultimo_update_energia = agora
+    
+    def _atualizar_tempo(self):
+        self.tempo_jogo += STEP_DELAY
+    
+    def _calcular_recompensa(self, morreu: bool, sobreviveu: bool, acao: int, acao_valida: bool) -> float:
+        if self.energia <= 0:
+            return -500.0
+        
         if morreu:
             return -500.0
 
         if sobreviveu:
             return +1000.0
 
-        recompensa = +1.0
-        nome_acao  = ACOES[acao]
+        # Ação inválida = recompensa neutra (0)
+        if not acao_valida:
+            return 0.0
 
+        # Recompensa base reduzida (evita que "fazer nada" seja muito vantajoso)
+        recompensa = +0.5
+        
+        # Bônus por progresso no tempo (incentiva sobreviver mais)
+        progresso = self.tempo_jogo / 535.0  # 535s = duração total da noite
+        recompensa += progresso * 0.5  # Até +0.5 no final
+        
+        nome_acao = ACOES[acao]
+
+        # Penalidade por ação repetida (evita spam)
+        # EXCETO para portas/luzes que podem estar sendo desligadas rapidamente
+        if nome_acao == self.ultima_acao and nome_acao != "nada":
+            # Se é porta/luz, só penaliza se repetiu 3x (não é só ligar/desligar)
+            if nome_acao in ["porta_esquerda", "porta_direita", "luz_esquerda", "luz_direita"]:
+                if nome_acao == self.penultima_acao:
+                    recompensa -= 1.5  # 3x seguidas = spam
+            else:
+                # Outras ações: penaliza já na 2ª repetição
+                recompensa -= 1.0
+
+        # Pequena penalidade por usar portas (gasta energia)
         if nome_acao in ["porta_esquerda", "porta_direita"]:
-            recompensa -= 0.5
-
-        if nome_acao in ["luz_esquerda", "luz_direita"]:
             recompensa -= 0.3
 
+        # Pequena penalidade por usar luzes (gasta energia)
+        if nome_acao in ["luz_esquerda", "luz_direita"]:
+            recompensa -= 0.2
+
+        # Penalidade maior por ter ambas portas fechadas (desperdício)
         if self.porta_esq and self.porta_dir:
-            recompensa -= 2.0
+            recompensa -= 1.0
+
+        # Bônus aumentado por usar câmera (incentiva monitoramento)
+        if nome_acao.startswith("camera_") or nome_acao == "abrir_fechar_camera":
+            recompensa += 0.4
+
+        # Penalidade progressiva aumentada por energia baixa (cria urgência real)
+        if self.energia < 20:
+            recompensa -= 1.5
+        elif self.energia < 40:
+            recompensa -= 0.8
+
+        # Limita recompensa mínima para estabilidade do treino
+        recompensa = max(recompensa, -2.0)
 
         return recompensa
 
-    def _capturar_observacao(self) -> np.ndarray:
+    def _capturar_observacao(self) -> dict:
         frame = self.capture.capturar_tela()
         frame = self.capture.redimensionar(frame, LARGURA, ALTURA)
         frame = self.capture.para_escala_cinza(frame)
         frame = np.expand_dims(frame, axis=-1)
-        return frame
+
+        estados = np.array([
+            float(self.porta_esq),
+            float(self.porta_dir),
+            float(self.luz_esq),
+            float(self.luz_dir),
+            float(self.camera_aberta),
+            float(self.camera_ativa) / 11.0,
+            float(self.energia) / 100.0
+        ], dtype=np.float32)
+
+        return {"imagem": frame, "estados": estados}
 
     def _carregar_templates(self):
         refs = Path(__file__).parent.parent / "utils" / "referencias"

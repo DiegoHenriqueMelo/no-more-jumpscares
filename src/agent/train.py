@@ -4,6 +4,7 @@ import keyboard
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
 from src.environment.fnaf_env import FNAFEnv
+from src.agent.multimodal_policy import MultimodalExtractor
 
 PASTA_MODELOS = "modelos"
 PASTA_LOGS    = "logs"
@@ -146,9 +147,13 @@ def treinar(timesteps: int = 500_000, carregar_modelo: str = None):
         modelo = PPO.load(carregar_modelo, env=env)
     else:
         print("Criando novo modelo PPO...")
+        policy_kwargs = dict(
+            features_extractor_class=MultimodalExtractor,
+        )
         modelo = PPO(
-            policy="CnnPolicy",
+            policy="MultiInputPolicy",
             env=env,
+            policy_kwargs=policy_kwargs,
             learning_rate=3e-4,
             n_steps=2048,
             batch_size=64,
