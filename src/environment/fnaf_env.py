@@ -375,29 +375,17 @@ class FNAFEnv(gym.Env):
         if not self._janela_do_jogo_aberta():
             return self._interromper_episodio("janela do jogo nao encontrada")
 
-        # Se energia acabou, desliga tudo e aguarda morte
+        # Quando energia acabou, desliga tudo mas não encerra ainda —
+        # no FNAF1 o Freddy demora alguns segundos para aparecer após a
+        # energia zerar. Encerrar aqui causaria reset() durante a animação
+        # de morte, corrompendo o estado do jogo. O episódio termina quando
+        # _detectar_morte() confirmar via template, igual ao caminho normal.
         if self.energia <= 0:
             self.porta_esq = False
             self.porta_dir = False
             self.luz_esq = False
             self.luz_dir = False
             self.camera_aberta = False
-            # Continua por alguns steps até detectar morte
-            time.sleep(STEP_DELAY)
-            try:
-                observacao = self._capturar_observacao()
-                morreu = self._detectar_morte()
-            except Exception as erro:
-                return self._interromper_episodio(f"falha ao capturar estado: {erro}")
-            
-            return observacao, -500.0, True, False, {
-                "passos":      self.passos,
-                "energia":     0.0,
-                "tempo":       self.tempo_jogo,
-                "tempo_real":  time.perf_counter() - (self.episode_start_time or time.perf_counter()),
-                "morreu":      True,
-                "sem_energia": True,
-            }
 
         acao_valida = self._executar_acao(acao)
         time.sleep(STEP_DELAY)
@@ -698,8 +686,10 @@ class FNAFEnv(gym.Env):
         return cv2.resize(cinza, self._ref_size)
 
     def _detectar_morte(self) -> bool:
-        # Ignora detecção nos primeiros 30 passos (~7.5s) para o jogo terminar de carregar
-        if self.passos < 30:
+        # Ignora detecção nos primeiros 120 passos (~30s de episódio / ~60s de jogo
+        # real contando o reset) para evitar detectar a tela de Game Over do episódio
+        # anterior, que pode persistir durante a transição de reset.
+        if self.passos < 120:
             return False
         
         frame = self._capturar_janela()
