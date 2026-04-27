@@ -63,6 +63,14 @@ class GameCapture:
         """Clica numa posição da tela."""
         pyautogui.click(x, y)
 
+    def segurar_botao(self, x: int, y: int):
+        """Pressiona e segura o botão esquerdo do mouse em (x, y)."""
+        pyautogui.mouseDown(x=x, y=y)
+
+    def soltar_botao(self, x: int, y: int):
+        """Solta o botão esquerdo do mouse."""
+        pyautogui.mouseUp(x=x, y=y)
+
     def mover_mouse(self, x: int, y: int):
         """Move o mouse sem clicar (instantâneo)."""
         pyautogui.moveTo(x, y)

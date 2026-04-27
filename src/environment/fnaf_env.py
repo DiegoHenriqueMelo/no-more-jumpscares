@@ -173,15 +173,33 @@ class FNAFEnv(gym.Env):
         self.camera_aberta = False
         self.camera_ativa = 0
         self.vivo      = True
-        self.lado_atual = None
+        self.lado_atual = "centro"
         self.ultima_acao = None
         self.penultima_acao = None
-        self.ultimo_update_energia = None
-        self.passos_sem_camera     = 0
+        self.ultimo_update_energia   = None
+        self.passos_sem_camera        = 0
+        self._botao_luz_pressionado   = None
+        self.cooldown_porta_esq       = 0  # só bloqueia porta (animação ~0.6s)
+        self.cooldown_porta_dir       = 0  # só bloqueia porta (animação ~0.6s)
+        self.cooldown_camera          = 0  # bloqueia abrir/fechar câmera (animação ~1.0s)
 
     def _janela_do_jogo_aberta(self) -> bool:
         import pygetwindow as gw
         return bool(gw.getWindowsWithTitle(WINDOW_TITLE))
+
+    def _verificar_e_focar_janela(self) -> bool:
+        import pygetwindow as gw
+        janelas = gw.getWindowsWithTitle(WINDOW_TITLE)
+        if not janelas:
+            return False
+        win = janelas[0]
+        try:
+            if not win.isActive:
+                win.activate()
+                time.sleep(0.15)  # 0.15s: Windows precisa de tempo para processar o foco
+        except Exception:
+            pass
+        return True
 
     @staticmethod
     def _normalizar_texto(texto: str) -> str:
@@ -295,6 +313,13 @@ class FNAFEnv(gym.Env):
         return True
 
     def _interromper_episodio(self, motivo: str):
+        if self._botao_luz_pressionado:
+            try:
+                self.capture.soltar_botao(*self._botao_luz_pressionado)
+            except Exception:
+                pass
+            self._botao_luz_pressionado = None
+
         recuperado = self._abrir_jogo_fallback()
         if not recuperado:
             motivo = f"{motivo} (fallback sem sucesso)"
@@ -339,13 +364,17 @@ class FNAFEnv(gym.Env):
         self.camera_aberta    = False
         self.camera_ativa     = 0
         self.vivo             = True
-        self.lado_atual       = None
+        self.lado_atual       = "centro"
         self.ultima_acao      = None
         self.penultima_acao   = None
         self.contador_vitoria  = 0
         self.ultimo_update_energia = None
         self.episode_start_time    = None
-        self.passos_sem_camera     = 0
+        self.passos_sem_camera        = 0
+        self._botao_luz_pressionado   = None
+        self.cooldown_porta_esq       = 0
+        self.cooldown_porta_dir       = 0
+        self.cooldown_camera          = 0
 
         if not self._janela_do_jogo_aberta():
             self._abrir_jogo_fallback()
@@ -360,19 +389,19 @@ class FNAFEnv(gym.Env):
         self.capture.clicar(*RESET_CLICK)
         time.sleep(15)
         self.capture.clicar(*RESET_CLICK)
-        time.sleep(20)
-
-        print("Reset completo — noite iniciada!")
         agora = time.perf_counter()
         self.ultimo_update_energia = agora
         self.episode_start_time    = agora
+        time.sleep(20)
+
+        print("Reset completo — noite iniciada!")
         observacao = self._capturar_observacao()
         return observacao, {}
 
     def step(self, acao: int):
         self.passos += 1
 
-        if not self._janela_do_jogo_aberta():
+        if not self._verificar_e_focar_janela():
             return self._interromper_episodio("janela do jogo nao encontrada")
 
         # Quando energia acabou, desliga tudo mas não encerra ainda —
@@ -389,22 +418,36 @@ class FNAFEnv(gym.Env):
 
         acao_valida = self._executar_acao(acao)
         time.sleep(STEP_DELAY)
-        
-        self._atualizar_luzes()
+
+        try:
+            # Captura com o botão de luz ainda pressionado — imagem mostra
+            # o corredor iluminado e estados[2/3] refletem luz=True.
+            observacao = self._capturar_observacao()
+            morreu     = self._detectar_morte()
+            sobreviveu = self._detectar_vitoria()
+        except Exception as erro:
+            return self._interromper_episodio(f"falha ao capturar estado: {erro}")
+
+        if self._botao_luz_pressionado:
+            self.capture.soltar_botao(*self._botao_luz_pressionado)
+            self._botao_luz_pressionado = None
+
+        # Preserva estado das luzes antes de _atualizar_luzes() zerá-las,
+        # para que o info dict reflita se foram usadas neste step.
+        luz_esq_step = self.luz_esq
+        luz_dir_step = self.luz_dir
+
+        # Ordem obrigatória: energia ANTES de luzes.
+        # _atualizar_luzes() reseta luz_esq/luz_dir para False via timer.
+        # Se invertido, a energia seria calculada sem o consumo da luz deste step.
         self._atualizar_energia()
+        self._atualizar_luzes()
         self._atualizar_tempo()
 
         if self.camera_aberta:
             self.passos_sem_camera = 0
         else:
             self.passos_sem_camera += 1
-
-        try:
-            observacao = self._capturar_observacao()
-            morreu     = self._detectar_morte()
-            sobreviveu = self._detectar_vitoria()
-        except Exception as erro:
-            return self._interromper_episodio(f"falha ao capturar estado: {erro}")
 
         recompensa = self._calcular_recompensa(morreu, sobreviveu, acao, acao_valida)
         terminado  = morreu or sobreviveu
@@ -415,14 +458,15 @@ class FNAFEnv(gym.Env):
             "energia":        self.energia,
             "tempo":          self.tempo_jogo,
             "tempo_real":     time.perf_counter() - (self.episode_start_time or time.perf_counter()),
-            "luz_esq":        self.luz_esq,
-            "luz_dir":        self.luz_dir,
+            "luz_esq":        luz_esq_step,
+            "luz_dir":        luz_dir_step,
             "porta_esq":      self.porta_esq,
             "porta_dir":      self.porta_dir,
             "camera_aberta":  self.camera_aberta,
             "camera_ativa":   self.camera_ativa,
             "morreu":         morreu,
             "acao_valida":    acao_valida,
+            "acao_nome":      ACOES[acao],
         }
 
         return observacao, recompensa, terminado, truncado, info
@@ -441,21 +485,31 @@ class FNAFEnv(gym.Env):
         if nome_acao in ["porta_esquerda", "porta_direita", "luz_esquerda", "luz_direita"]:
             if self.camera_aberta:
                 return False  # Ação inválida - está na câmera
-            
+
             if nome_acao == "porta_esquerda":
+                if self.cooldown_porta_esq > 0:
+                    return False
                 self.porta_esq = not self.porta_esq
+                self.cooldown_porta_esq = 3  # 3 steps × 0.25s = 0.75s — cobre animação da porta
             elif nome_acao == "porta_direita":
+                if self.cooldown_porta_dir > 0:
+                    return False
                 self.porta_dir = not self.porta_dir
+                self.cooldown_porta_dir = 3
             elif nome_acao == "luz_esquerda":
+                # Luz não tem animação no FNAF1: botão independente da porta, sem cooldown
                 self.luz_esq = True
-                self.luz_esq_timer = 1  # Desliga após 1 step
+                self.luz_esq_timer = 1
             elif nome_acao == "luz_direita":
                 self.luz_dir = True
-                self.luz_dir_timer = 1  # Desliga após 1 step
+                self.luz_dir_timer = 1
 
-        # Abrir/fechar câmera sempre funciona
+        # Abrir/fechar câmera — bloqueado durante cooldown para aguardar animação (~1.0s)
         elif nome_acao == "abrir_fechar_camera":
+            if self.cooldown_camera > 0:
+                return False
             self.camera_aberta = not self.camera_aberta
+            self.cooldown_camera = 4  # 4 steps × 0.25s = 1.0s — cobre animação completa
             if not self.camera_aberta:
                 self.camera_ativa = 0
             # Ao abrir câmera, desliga luzes (não fazem sentido no contexto)
@@ -464,11 +518,15 @@ class FNAFEnv(gym.Env):
                 self.luz_dir = False
                 self.luz_esq_timer = 0
                 self.luz_dir_timer = 0
-            # Arrasta o mouse de cima para baixo até o botão para acionar
-            # a animação de arrastar a prancheta do jogo
+            # Arrasta o mouse para acionar a animação da prancheta.
+            # Abrir = arrasta para baixo (de cima para o botão).
+            # Fechar = arrasta para cima (de baixo para o botão).
             if nome_acao in COORDS:
                 x, y = COORDS[nome_acao]
-                self.capture.mover_mouse(x, y - CAMERA_DRAG_PIXELS)
+                if self.camera_aberta:
+                    self.capture.mover_mouse(x, y - CAMERA_DRAG_PIXELS)
+                else:
+                    self.capture.mover_mouse(x, y + CAMERA_DRAG_PIXELS)
                 self.capture.arrastar_para(x, y, duration=CAMERA_DRAG_DURATION)
 
         # Trocar de câmera só funciona se câmera estiver aberta
@@ -480,17 +538,31 @@ class FNAFEnv(gym.Env):
         if nome_acao in COORDS:
             x, y = COORDS[nome_acao]
 
-            # Ao trocar de lado, move antes e espera um pouco para o jogo
-            # finalizar a transicao de camera antes do clique real.
-            if lado_alvo and self.lado_atual and lado_alvo != self.lado_atual:
-                self.capture.mover_mouse(x, y)
-                time.sleep(SIDE_SWITCH_DELAY)
-            # Ao sair das cameras para luz/porta direita, espera para a camera acompanhar
-            elif self.ultima_acao in ACOES_CAMERA and nome_acao in {"luz_direita", "porta_direita"}:
+            _saindo_camera = (self.ultima_acao in ACOES_CAMERA or
+                              self.ultima_acao == "abrir_fechar_camera")
+            _indo_porta_luz = nome_acao in {
+                "luz_esquerda", "luz_direita", "porta_esquerda", "porta_direita"
+            }
+
+            # Saindo de qualquer ação de câmera para porta/luz OU para fechar/abrir câmera:
+            # aguarda a animação da prancheta terminar antes do próximo clique.
+            if _saindo_camera and (_indo_porta_luz or nome_acao == "abrir_fechar_camera"):
                 self.capture.mover_mouse(x, y)
                 time.sleep(CAMERA_EXIT_DELAY)
+            # Ao trocar de lado sem vir de câmera, aguarda a virada de cabeça.
+            elif lado_alvo and self.lado_atual and lado_alvo != self.lado_atual:
+                self.capture.mover_mouse(x, y)
+                time.sleep(SIDE_SWITCH_DELAY)
 
-            self.capture.clicar(x, y)
+            # Re-verifica foco após qualquer delay — outros processos podem ter
+            # roubado o foco durante CAMERA_EXIT_DELAY ou SIDE_SWITCH_DELAY.
+            self._verificar_e_focar_janela()
+
+            if nome_acao in {"luz_esquerda", "luz_direita"}:
+                self.capture.segurar_botao(x, y)
+                self._botao_luz_pressionado = (x, y)
+            else:
+                self.capture.clicar(x, y)
 
             if lado_alvo:
                 self.lado_atual = lado_alvo
@@ -505,11 +577,18 @@ class FNAFEnv(gym.Env):
             self.luz_esq_timer -= 1
             if self.luz_esq_timer == 0:
                 self.luz_esq = False
-        
+
         if self.luz_dir_timer > 0:
             self.luz_dir_timer -= 1
             if self.luz_dir_timer == 0:
                 self.luz_dir = False
+
+        if self.cooldown_porta_esq > 0:
+            self.cooldown_porta_esq -= 1
+        if self.cooldown_porta_dir > 0:
+            self.cooldown_porta_dir -= 1
+        if self.cooldown_camera > 0:
+            self.cooldown_camera -= 1
     
     def _atualizar_energia(self):
         agora = time.perf_counter()
@@ -527,7 +606,7 @@ class FNAFEnv(gym.Env):
         usage += int(self.camera_aberta)
         usage = min(usage, 4)
         
-        consumo_por_segundo = usage * 0.1
+        consumo_por_segundo = usage * 0.107
         self.energia -= consumo_por_segundo * dt
         self.energia = max(0.0, self.energia)
         
@@ -567,7 +646,7 @@ class FNAFEnv(gym.Env):
             return +1000.0
 
         if not acao_valida:
-            return 0.0
+            return -0.5
 
         # "nada" e demais ações partem de recompensa neutra
         recompensa = 0.0
