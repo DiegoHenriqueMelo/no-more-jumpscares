@@ -39,7 +39,14 @@ LOG_PATTERN = re.compile(
     r"(?P<resultado>[A-Za-z_]+)\s*\|\s*Passos:\s*(?P<passos>-?\d+)\s*\|\s*"
     r"(?:(?:Tempo(?:\s+EP)?):\s*(?P<tempo_minutos>-?\d+(?:[.,]\d+)?)\s*min(?:utos)?\s*\|\s*)?"
     r"Recompensa:\s*(?P<recompensa>-?\d+(?:[.,]\d+)?)\s*\|\s*"
-    r"Taxa[^:]*:\s*(?P<taxa>-?\d+(?:[.,]\d+)?)%\s*$",
+    r"Taxa[^:]*:\s*(?P<taxa>-?\d+(?:[.,]\d+)?)%"
+    r"(?:\s*\|\s*Ocorrido:\s*(?P<ocorrido>.+?))?\s*$",
+    re.IGNORECASE,
+)
+
+OCORRIDO_PATTERN = re.compile(
+    r"^\s*(?:(?P<pc>[^|]+?)\s*\|\s*)?Ep\s*(?P<ep>\d+)\s*\|\s*"
+    r"OCORRIDO\s*\|\s*(?P<ocorrido>.+?)\s*$",
     re.IGNORECASE,
 )
 
@@ -224,6 +231,7 @@ def ler_log_treino(caminho: Path) -> tuple[list[dict[str, Any]], str | None]:
     pc_detectado: str | None = None
     sessao_treino_atual = 0
     sessao_pendente = False
+    indice_por_sessao_ep: dict[tuple[int, int], int] = {}
 
     with caminho.open("r", encoding="utf-8", errors="ignore") as arquivo:
         for linha in arquivo:
@@ -231,6 +239,20 @@ def ler_log_treino(caminho: Path) -> tuple[list[dict[str, Any]], str | None]:
             if TREINO_INICIADO_PATTERN.match(linha):
                 # So avanca sessao quando aparecer o primeiro episodio da nova sessao.
                 sessao_pendente = True
+                continue
+
+            match_ocorrido = OCORRIDO_PATTERN.match(linha)
+            if match_ocorrido:
+                ep_ocorrido = int(match_ocorrido.group("ep"))
+                indice_registro = indice_por_sessao_ep.get((sessao_treino_atual, ep_ocorrido))
+                if indice_registro is not None:
+                    registros[indice_registro]["ocorrido"] = match_ocorrido.group("ocorrido").strip()
+
+                    pc_linha_ocorrido = (match_ocorrido.group("pc") or "").strip()
+                    if pc_detectado is None and pc_linha_ocorrido:
+                        pc_detectado = pc_linha_ocorrido
+                    if pc_linha_ocorrido:
+                        registros[indice_registro]["pc"] = pc_linha_ocorrido
                 continue
 
             match = LOG_PATTERN.match(linha)
@@ -257,6 +279,10 @@ def ler_log_treino(caminho: Path) -> tuple[list[dict[str, Any]], str | None]:
                 "recompensa": float(match.group("recompensa").replace(",", ".")),
                 "taxa_vitoria": float(match.group("taxa").replace(",", ".")),
             }
+            ocorrido = match.group("ocorrido")
+            if ocorrido:
+                registro["ocorrido"] = ocorrido.strip()
+
             tempo_minutos = match.group("tempo_minutos")
             if tempo_minutos is not None:
                 registro["tempo_ep_minutos"] = float(tempo_minutos.replace(",", "."))
@@ -265,6 +291,7 @@ def ler_log_treino(caminho: Path) -> tuple[list[dict[str, Any]], str | None]:
                 registro["pc"] = pc_linha
 
             registros.append(registro)
+            indice_por_sessao_ep[(sessao_treino_atual, registro["ep"])] = len(registros) - 1
 
     return registros, pc_detectado
 

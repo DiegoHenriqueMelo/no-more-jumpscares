@@ -41,6 +41,11 @@ Configuração importante — modo janela e coordenadas
   em modo janela. Ou seja: sempre cadastre as coordenadas com o
   jogo em modo janela (ALT+ENTER) e com a janela posicionada
   como pretende usá‑la durante o treino.
+- Para fallback automático quando o jogo fechar inesperadamente,
+  configure no `.env`:
+  - `FNAF_EXECUTABLE_PATH` (caminho completo do `.exe` do jogo)
+  - `FNAF_REABRIR_ESPERA_SEGUNDOS` (espera antes do ALT+ENTER)
+  - `FNAF_POS_ALT_ENTER_ESPERA_SEGUNDOS` (espera após ALT+ENTER)
 
 Como cadastrar coordenadas e imagens de referência
 
@@ -116,6 +121,10 @@ Treino iniciado
 Ep    1 | MORTE    | Passos:    455 | Recompensa:    114.8 | Taxa vitória: 0.0%
 pc0 | Ep    2 | MORTE    | Passos:    510 | Recompensa:     37.5 | Taxa vitória: 0.0%
 ```
+
+Em caso de fechamento inesperado do jogo, o episodio e marcado como
+`INTERROMPIDO` e o log pode incluir `| Ocorrido: <motivo>` no final.
+Esses episodios nao contam como morte/vitoria para a taxa de vitoria.
 
 Observacoes:
 
