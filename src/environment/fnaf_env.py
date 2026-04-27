@@ -125,6 +125,8 @@ RESET_CLICK = (
 STEP_DELAY = _env_float_opcional("FNAF_STEP_DELAY", 0.25)
 SIDE_SWITCH_DELAY = _env_float_opcional("FNAF_SIDE_SWITCH_DELAY", 0.12)
 CAMERA_EXIT_DELAY = _env_float_opcional("FNAF_CAMERA_EXIT_DELAY", 0.5)
+CAMERA_DRAG_PIXELS   = _env_int_opcional("FNAF_CAMERA_DRAG_PIXELS", 80)
+CAMERA_DRAG_DURATION = _env_float_opcional("FNAF_CAMERA_DRAG_DURATION", 0.15)
 
 COORDS = {
     acao: _env_coord(acao)
@@ -175,6 +177,7 @@ class FNAFEnv(gym.Env):
         self.ultima_acao = None
         self.penultima_acao = None
         self.ultimo_update_energia = None
+        self.passos_sem_camera     = 0
 
     def _janela_do_jogo_aberta(self) -> bool:
         import pygetwindow as gw
@@ -297,15 +300,16 @@ class FNAFEnv(gym.Env):
             motivo = f"{motivo} (fallback sem sucesso)"
 
         info = {
-            "passos": self.passos,
-            "energia": self.energia,
-            "porta_esq": self.porta_esq,
-            "porta_dir": self.porta_dir,
+            "passos":       self.passos,
+            "energia":      self.energia,
+            "tempo_real":   time.perf_counter() - (self.episode_start_time or time.perf_counter()),
+            "porta_esq":    self.porta_esq,
+            "porta_dir":    self.porta_dir,
             "camera_aberta": self.camera_aberta,
             "camera_ativa": self.camera_ativa,
-            "morreu": False,
+            "morreu":       False,
             "interrompido": True,
-            "ocorrido": motivo,
+            "ocorrido":     motivo,
         }
 
         observacao = {
@@ -338,8 +342,10 @@ class FNAFEnv(gym.Env):
         self.lado_atual       = None
         self.ultima_acao      = None
         self.penultima_acao   = None
-        self.contador_vitoria = 0
-        self.ultimo_update_energia = time.perf_counter()
+        self.contador_vitoria  = 0
+        self.ultimo_update_energia = None
+        self.episode_start_time    = None
+        self.passos_sem_camera     = 0
 
         if not self._janela_do_jogo_aberta():
             self._abrir_jogo_fallback()
@@ -357,6 +363,9 @@ class FNAFEnv(gym.Env):
         time.sleep(20)
 
         print("Reset completo — noite iniciada!")
+        agora = time.perf_counter()
+        self.ultimo_update_energia = agora
+        self.episode_start_time    = agora
         observacao = self._capturar_observacao()
         return observacao, {}
 
@@ -382,10 +391,11 @@ class FNAFEnv(gym.Env):
                 return self._interromper_episodio(f"falha ao capturar estado: {erro}")
             
             return observacao, -500.0, True, False, {
-                "passos": self.passos,
-                "energia": 0.0,
-                "tempo": self.tempo_jogo,
-                "morreu": True,
+                "passos":      self.passos,
+                "energia":     0.0,
+                "tempo":       self.tempo_jogo,
+                "tempo_real":  time.perf_counter() - (self.episode_start_time or time.perf_counter()),
+                "morreu":      True,
                 "sem_energia": True,
             }
 
@@ -395,6 +405,11 @@ class FNAFEnv(gym.Env):
         self._atualizar_luzes()
         self._atualizar_energia()
         self._atualizar_tempo()
+
+        if self.camera_aberta:
+            self.passos_sem_camera = 0
+        else:
+            self.passos_sem_camera += 1
 
         try:
             observacao = self._capturar_observacao()
@@ -411,6 +426,7 @@ class FNAFEnv(gym.Env):
             "passos":         self.passos,
             "energia":        self.energia,
             "tempo":          self.tempo_jogo,
+            "tempo_real":     time.perf_counter() - (self.episode_start_time or time.perf_counter()),
             "luz_esq":        self.luz_esq,
             "luz_dir":        self.luz_dir,
             "porta_esq":      self.porta_esq,
@@ -460,6 +476,12 @@ class FNAFEnv(gym.Env):
                 self.luz_dir = False
                 self.luz_esq_timer = 0
                 self.luz_dir_timer = 0
+            # Arrasta o mouse de cima para baixo até o botão para acionar
+            # a animação de arrastar a prancheta do jogo
+            if nome_acao in COORDS:
+                x, y = COORDS[nome_acao]
+                self.capture.mover_mouse(x, y - CAMERA_DRAG_PIXELS)
+                self.capture.arrastar_para(x, y, duration=CAMERA_DRAG_DURATION)
 
         # Trocar de câmera só funciona se câmera estiver aberta
         elif nome_acao.startswith("camera_"):
@@ -526,63 +548,73 @@ class FNAFEnv(gym.Env):
     def _atualizar_tempo(self):
         self.tempo_jogo += STEP_DELAY
     
+    def _energia_esperada(self) -> float:
+        """Energia esperada (%) com base no progresso da noite, seguindo os thresholds do jogo."""
+        checkpoints = [
+            (0,   100.0),
+            (89,   85.0),   # 1AM
+            (178,  60.0),   # 2AM
+            (267,  40.0),   # 3AM
+            (356,  25.0),   # 4AM
+            (445,  15.0),   # 5AM
+            (535,   5.0),   # 6AM
+        ]
+        t = self.tempo_jogo
+        for i in range(len(checkpoints) - 1):
+            t0, e0 = checkpoints[i]
+            t1, e1 = checkpoints[i + 1]
+            if t <= t1:
+                frac = (t - t0) / (t1 - t0)
+                return e0 + frac * (e1 - e0)
+        return 5.0
+
     def _calcular_recompensa(self, morreu: bool, sobreviveu: bool, acao: int, acao_valida: bool) -> float:
         if self.energia <= 0:
             return -500.0
-        
+
         if morreu:
             return -500.0
 
         if sobreviveu:
             return +1000.0
 
-        # Ação inválida = recompensa neutra (0)
         if not acao_valida:
             return 0.0
 
-        # Recompensa base reduzida (evita que "fazer nada" seja muito vantajoso)
-        recompensa = +0.5
-        
+        # "nada" e demais ações partem de recompensa neutra
+        recompensa = 0.0
+
         # Bônus por progresso no tempo (incentiva sobreviver mais)
-        progresso = self.tempo_jogo / 535.0  # 535s = duração total da noite
-        recompensa += progresso * 0.5  # Até +0.5 no final
-        
+        progresso = self.tempo_jogo / 535.0
+        recompensa += progresso * 0.5  # até +0.5 no final
+
         nome_acao = ACOES[acao]
 
-        # Penalidade por ação repetida (evita spam)
-        # EXCETO para portas/luzes que podem estar sendo desligadas rapidamente
-        if nome_acao == self.ultima_acao and nome_acao != "nada":
-            # Se é porta/luz, só penaliza se repetiu 3x (não é só ligar/desligar)
+        # Penalidade por ação repetida — inclui "nada" para evitar passividade
+        if nome_acao == self.ultima_acao:
             if nome_acao in ["porta_esquerda", "porta_direita", "luz_esquerda", "luz_direita"]:
                 if nome_acao == self.penultima_acao:
                     recompensa -= 1.5  # 3x seguidas = spam
             else:
-                # Outras ações: penaliza já na 2ª repetição
                 recompensa -= 1.0
 
-        # Pequena penalidade por usar portas (gasta energia)
-        if nome_acao in ["porta_esquerda", "porta_direita"]:
-            recompensa -= 0.3
-
-        # Pequena penalidade por usar luzes (gasta energia)
+        # Pequena penalidade por usar luzes (gasta energia sem observar)
         if nome_acao in ["luz_esquerda", "luz_direita"]:
             recompensa -= 0.2
 
-        # Penalidade maior por ter ambas portas fechadas (desperdício)
+        # Penalidade por ter ambas as portas fechadas (raramente necessário)
         if self.porta_esq and self.porta_dir:
             recompensa -= 1.0
 
-        # Bônus aumentado por usar câmera (incentiva monitoramento)
-        if nome_acao.startswith("camera_") or nome_acao == "abrir_fechar_camera":
-            recompensa += 0.4
+        # Penalidade por inatividade da câmera — Foxy corre a cada ~5s sem câmera
+        if self.passos_sem_camera > 20:
+            excesso = self.passos_sem_camera - 20
+            recompensa -= min(excesso * 0.05, 1.0)
 
-        # Penalidade progressiva aumentada por energia baixa (cria urgência real)
-        if self.energia < 20:
-            recompensa -= 1.5
-        elif self.energia < 40:
-            recompensa -= 0.8
+        # Penalidade por energia abaixo do esperado para o momento da noite
+        deficit = max(0.0, self._energia_esperada() - self.energia)
+        recompensa -= deficit * 0.02
 
-        # Limita recompensa mínima para estabilidade do treino
         recompensa = max(recompensa, -2.0)
 
         return recompensa
@@ -666,12 +698,20 @@ class FNAFEnv(gym.Env):
         return cv2.resize(cinza, self._ref_size)
 
     def _detectar_morte(self) -> bool:
+        # Ignora detecção nos primeiros 30 passos (~7.5s) para o jogo terminar de carregar
+        if self.passos < 30:
+            return False
+        
         frame = self._capturar_janela()
         resultado = cv2.matchTemplate(frame, self.template_morte, cv2.TM_CCOEFF_NORMED)
         _, max_val, _, _ = cv2.minMaxLoc(resultado)
         return float(max_val) > 0.70
 
     def _detectar_vitoria(self) -> bool:
+        # Ignora detecção nos primeiros 30 passos (~7.5s) para o jogo terminar de carregar
+        if self.passos < 30:
+            return False
+        
         frame = self._capturar_janela()
         resultado = cv2.matchTemplate(frame, self.template_vitoria, cv2.TM_CCOEFF_NORMED)
         _, max_val, _, _ = cv2.minMaxLoc(resultado)

@@ -56,6 +56,13 @@ def executar_acao_no_jogo(nome_acao: str):
         pyautogui.click(x, y)
 
 def gravar():
+    print("\n" + "="*60)
+    print("AVISO: Este script grava apenas imagens (sem estados internos).")
+    print("Para usar com Behavioral Cloning, você precisará:")
+    print("  1. Modificar este script para gravar os 7 estados")
+    print("  2. Ou aceitar que BC usará estados=zeros (menos efetivo)")
+    print("="*60 + "\n")
+    
     pasta = f"gameplay_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     os.makedirs(f"dados/{pasta}/frames", exist_ok=True)
 

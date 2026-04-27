@@ -36,13 +36,12 @@ def _env_str_obrigatorio(nome: str) -> str:
 class LogCallback(BaseCallback):
     def __init__(self):
         super().__init__()
-        self.episodio         = 0
+        self.episodio          = 0
         self.episodios_validos = 0
-        self.mortes           = 0
-        self.vitorias         = 0
+        self.mortes            = 0
+        self.vitorias          = 0
         self.interrompidos     = 0
-        self.recompensa_total = 0.0
-        self.inicio_ep        = None
+        self.recompensa_total  = 0.0
         self._pausa_disponivel = True
 
         os.makedirs("logs", exist_ok=True)
@@ -63,21 +62,13 @@ class LogCallback(BaseCallback):
                 )
                 self._pausa_disponivel = False
 
-        if self.inicio_ep is None:
-            # Marca o inicio real do episodio para calcular duracao em minutos.
-            self.inicio_ep = time.perf_counter()
-
         info = self.locals.get("infos", [{}])[0]
         self.recompensa_total += self.locals.get("rewards", [0])[0]
 
         done = self.locals.get("dones", [False])[0]
         if done:
-            agora = time.perf_counter()
-            tempo_ep_minutos = (
-                (agora - self.inicio_ep) / 60.0
-                if self.inicio_ep is not None
-                else 0.0
-            )
+            # tempo_real vem do ambiente — medido antes do reset do próximo episódio
+            tempo_ep_minutos = info.get("tempo_real", 0.0) / 60.0
 
             self.episodio += 1
             interrompido = info.get("interrompido", False)
@@ -125,7 +116,6 @@ class LogCallback(BaseCallback):
 
             self.arquivo_log.flush()
             self.recompensa_total = 0.0
-            self.inicio_ep = None
 
         return True
 
@@ -158,7 +148,7 @@ def treinar(timesteps: int = 500_000, carregar_modelo: str = None):
             n_steps=2048,
             batch_size=64,
             n_epochs=10,
-            gamma=0.99,
+            gamma=0.995,
             verbose=0,
             tensorboard_log=PASTA_LOGS,
             device="auto",

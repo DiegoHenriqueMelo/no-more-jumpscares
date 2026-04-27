@@ -24,7 +24,7 @@ class MultimodalExtractor(BaseFeaturesExtractor):
             cnn_output_dim = self.cnn(sample_img).shape[1]
 
         self.fc_estados = nn.Sequential(
-            nn.Linear(5, 32),
+            nn.Linear(7, 32),
             nn.ReLU(),
         )
 
@@ -40,7 +40,10 @@ class MultimodalExtractor(BaseFeaturesExtractor):
         if imagem.dim() == 3:
             imagem = imagem.unsqueeze(0)
 
-        imagem = imagem.permute(0, 3, 1, 2)
+        if imagem.shape[-1] == 1:
+            imagem = imagem.permute(0, 3, 1, 2)
+        elif imagem.shape[1] != 1:
+            imagem = imagem.permute(0, 3, 1, 2)
 
         features_img = self.cnn(imagem)
         features_estados = self.fc_estados(estados)
