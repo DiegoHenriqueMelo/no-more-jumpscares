@@ -166,8 +166,6 @@ class FNAFEnv(gym.Env):
         self.tempo_jogo = 0.0
         self.luz_esq = False
         self.luz_dir = False
-        self.luz_esq_timer = 0
-        self.luz_dir_timer = 0
         self.porta_esq = False
         self.porta_dir = False
         self.camera_aberta = False
@@ -423,8 +421,6 @@ class FNAFEnv(gym.Env):
         self.tempo_jogo       = 0.0
         self.luz_esq          = False
         self.luz_dir          = False
-        self.luz_esq_timer    = 0
-        self.luz_dir_timer    = 0
         self.porta_esq        = False
         self.porta_dir        = False
         self.camera_aberta    = False
@@ -523,9 +519,36 @@ class FNAFEnv(gym.Env):
                 acao_valida = False
             self._pixel_antes_porta = None
 
+        # Pressiona o botão de luz ativa antes de capturar a observação —
+        # mantém o corredor iluminado na imagem e sincroniza passivamente a porta do mesmo lado.
+        if self.luz_esq:
+            lx, ly = COORDS["luz_esquerda"]
+            self.capture.segurar_botao(lx, ly)
+            self._botao_luz_pressionado = (lx, ly)
+            _frame_l = self.capture.capturar_tela()
+            _px, _py = COORDS["porta_esquerda"]
+            _h, _w = _frame_l.shape[:2]
+            if 0 <= _py < _h and 0 <= _px < _w:
+                _gl, _rl = int(_frame_l[_py, _px][1]), int(_frame_l[_py, _px][2])
+                _real = True if _gl > _rl + 50 else (False if _rl > _gl + 50 else None)
+                if _real is not None and _real != self.porta_esq:
+                    self.porta_esq = _real
+                    self._count_sync_porta += 1
+        elif self.luz_dir:
+            lx, ly = COORDS["luz_direita"]
+            self.capture.segurar_botao(lx, ly)
+            self._botao_luz_pressionado = (lx, ly)
+            _frame_l = self.capture.capturar_tela()
+            _px, _py = COORDS["porta_direita"]
+            _h, _w = _frame_l.shape[:2]
+            if 0 <= _py < _h and 0 <= _px < _w:
+                _gl, _rl = int(_frame_l[_py, _px][1]), int(_frame_l[_py, _px][2])
+                _real = True if _gl > _rl + 50 else (False if _rl > _gl + 50 else None)
+                if _real is not None and _real != self.porta_dir:
+                    self.porta_dir = _real
+                    self._count_sync_porta += 1
+
         try:
-            # Captura com o botão de luz ainda pressionado — imagem mostra
-            # o corredor iluminado e estados[2/3] refletem luz=True.
             observacao = self._capturar_observacao()
             morreu     = self._detectar_morte()
             sobreviveu = self._detectar_vitoria()
@@ -536,16 +559,11 @@ class FNAFEnv(gym.Env):
             self.capture.soltar_botao(*self._botao_luz_pressionado)
             self._botao_luz_pressionado = None
 
-        # Preserva estado das luzes antes de _atualizar_luzes() zerá-las,
-        # para que o info dict reflita se foram usadas neste step.
         luz_esq_step = self.luz_esq
         luz_dir_step = self.luz_dir
 
-        # Ordem obrigatória: energia ANTES de luzes.
-        # _atualizar_luzes() reseta luz_esq/luz_dir para False via timer.
-        # Se invertido, a energia seria calculada sem o consumo da luz deste step.
         self._atualizar_energia()
-        self._atualizar_luzes()
+        self._atualizar_cooldowns()
         self._atualizar_tempo()
 
         if self.camera_aberta:
@@ -627,12 +645,17 @@ class FNAFEnv(gym.Env):
                 self.porta_dir = not self.porta_dir
                 self.cooldown_porta_dir = 3
             elif nome_acao == "luz_esquerda":
-                # Luz não tem animação no FNAF1: botão independente da porta, sem cooldown
-                self.luz_esq = True
-                self.luz_esq_timer = 1
+                if self.luz_esq:
+                    self.luz_esq = False
+                else:
+                    self.luz_dir = False  # só uma luz por vez
+                    self.luz_esq = True
             elif nome_acao == "luz_direita":
-                self.luz_dir = True
-                self.luz_dir_timer = 1
+                if self.luz_dir:
+                    self.luz_dir = False
+                else:
+                    self.luz_esq = False  # só uma luz por vez
+                    self.luz_dir = True
 
         # Abrir/fechar câmera — bloqueado durante cooldown para aguardar animação (~1.0s)
         elif nome_acao == "abrir_fechar_camera":
@@ -642,12 +665,10 @@ class FNAFEnv(gym.Env):
             self.cooldown_camera = 4  # 4 steps × 0.25s = 1.0s — cobre animação completa
             if not self.camera_aberta:
                 self.camera_ativa = 0
-            # Ao abrir câmera, desliga luzes (não fazem sentido no contexto)
+            # Ao abrir câmera, desliga luzes
             if self.camera_aberta:
                 self.luz_esq = False
                 self.luz_dir = False
-                self.luz_esq_timer = 0
-                self.luz_dir_timer = 0
 
         # Trocar de câmera só funciona se câmera estiver aberta
         elif nome_acao.startswith("camera_"):
@@ -702,29 +723,7 @@ class FNAFEnv(gym.Env):
                 time.sleep(0.08)
                 self.capture.arrastar_para(x, y - CAMERA_DRAG_PIXELS, duration=CAMERA_DRAG_DURATION)
             elif nome_acao in {"luz_esquerda", "luz_direita"}:
-                self.capture.segurar_botao(x, y)
-                self._botao_luz_pressionado = (x, y)
-                # Leitura passiva da porta do mesmo lado enquanto a luz está pressionada
-                porta_nome = "porta_esquerda" if nome_acao == "luz_esquerda" else "porta_direita"
-                px_d, py_d = COORDS[porta_nome]
-                frame_luz = self.capture.capturar_tela()
-                h_luz, w_luz = frame_luz.shape[:2]
-                if 0 <= py_d < h_luz and 0 <= px_d < w_luz:
-                    gl, rl = int(frame_luz[py_d, px_d][1]), int(frame_luz[py_d, px_d][2])
-                    if gl > rl + 50:
-                        _estado_porta_real = True
-                    elif rl > gl + 50:
-                        _estado_porta_real = False
-                    else:
-                        _estado_porta_real = None
-                    if _estado_porta_real is not None:
-                        _estado_porta_atual = self.porta_esq if nome_acao == "luz_esquerda" else self.porta_dir
-                        if _estado_porta_real != _estado_porta_atual:
-                            if nome_acao == "luz_esquerda":
-                                self.porta_esq = _estado_porta_real
-                            else:
-                                self.porta_dir = _estado_porta_real
-                            self._count_sync_porta += 1
+                pass  # press e SYNC-LUZ acontecem em step() antes da observação
             else:
                 # Captura pixel antes do clique como referência para verificação pós-clique.
                 if nome_acao in {"porta_esquerda", "porta_direita"}:
@@ -741,18 +740,7 @@ class FNAFEnv(gym.Env):
         self.ultima_acao = nome_acao
         return True
 
-    def _atualizar_luzes(self):
-        """Luzes desligam automaticamente após 1 step (comportamento realista)."""
-        if self.luz_esq_timer > 0:
-            self.luz_esq_timer -= 1
-            if self.luz_esq_timer == 0:
-                self.luz_esq = False
-
-        if self.luz_dir_timer > 0:
-            self.luz_dir_timer -= 1
-            if self.luz_dir_timer == 0:
-                self.luz_dir = False
-
+    def _atualizar_cooldowns(self):
         if self.cooldown_porta_esq > 0:
             self.cooldown_porta_esq -= 1
         if self.cooldown_porta_dir > 0:
@@ -773,7 +761,7 @@ class FNAFEnv(gym.Env):
                         + int(self.camera_aberta))
         itens_ativos = min(itens_ativos, 3)
 
-        consumo_por_segundo = 0.080 + itens_ativos * 0.120
+        consumo_por_segundo = 0.104 + itens_ativos * 0.100
         self.energia -= consumo_por_segundo * dt
         self.energia = max(0.0, self.energia)
         

@@ -33,17 +33,16 @@ pelo pixel. Agora o ambiente rastreia `self.energia` em tempo real usando
 `time.perf_counter()` para calcular o `dt` entre atualizações.
 
 O consumo é separado em duas parcelas: passivo (fixo) e ativo (proporcional ao
-número de itens ligados):
+número de itens ligados), com base nas taxas medidas do FNAF1 Night 1:
 
 ```
-consumo_por_segundo = 0.080 + itens_ativos * 0.120
+consumo_por_segundo = 0.104 + itens_ativos * 0.100
 itens_ativos = min(porta_esq + porta_dir + luz_esq + luz_dir + camera_aberta, 3)
 ```
 
-Com todos os sistemas ativos (3 itens no máximo), o consumo chega a 0.44%/s e a
-energia acaba em ~227s — bem antes dos 535s da noite completa. Isso cria pressão
-real para o agente economizar. Os valores foram calibrados com base nas taxas
-reais do FNAF1 (Night 1 passivo ≈ 0.104%/s; cada item adicional ≈ 0.100%/s).
+Com todos os sistemas ativos (3 itens), o consumo chega a 0.404%/s e a energia
+acaba em ~247s — bem antes dos 535s da noite completa. O passivo puro (0.104%/s)
+consome ~55% em uma noite inteira, deixando ~45% ao final sem nenhuma ação ativa.
 
 Quando `energia <= 0`, o ambiente desliga tudo e aguarda a morte (Freddy demora
 alguns segundos para aparecer quando a energia acaba), retornando recompensa −500.
@@ -60,12 +59,22 @@ com câmera **aberta**. Ações inválidas retornam `False` e recebem recompensa
 
 ---
 
-## Luzes com duração de 1 passo
+## Luzes — comportamento toggle persistente
 
-Antes as luzes eram toggle permanente. No jogo real elas são momentâneas — você
-segura o botão e solta. A implementação nova liga a luz e seta um timer de 1 step;
-no próximo `_atualizar_luzes()` ela apaga sozinha. Ao abrir a câmera, ambas as
-luzes são forçadas para off (o painel não existe nesse contexto).
+As luzes funcionam como toggle: a primeira pressão liga, a segunda desliga.
+Uma vez ativas, permanecem ligadas até:
+
+1. O agente pressionar o mesmo botão novamente (desliga)
+2. A câmera ser aberta (força off ambas)
+3. A energia zerar (força off ambas)
+
+Apenas uma luz pode estar ativa por vez: ligar a esquerda desliga a direita
+automaticamente e vice-versa.
+
+Fisicamente, o botão da luz é pressionado e solto a cada step imediatamente
+antes da captura de observação. Isso garante que a imagem observe o corredor
+iluminado enquanto a luz está ativa, sem manter o mouse clicado entre steps
+(o que causaria conflitos com outras ações).
 
 ---
 
