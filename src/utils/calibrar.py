@@ -35,6 +35,80 @@ def capturar_vitoria():
     cv2.imwrite("src/utils/referencias/vitoria.png", frame)
     print("Imagem de vitória salva!")
 
+def capturar_camera_aberta():
+    """
+    Com a câmera ABERTA no jogo (qualquer tab), clique sobre o indicador 'YOU'
+    no mapa de câmeras. Salva o recorte em referencias/camera_aberta.png.
+    """
+    import ctypes
+    import sys
+    import pyautogui
+
+    VK_LBUTTON = 0x01
+
+    print("Abra a câmera no FNAF1 (qualquer tab serve).")
+    print("Localize o quadrado 'YOU' no mapa de câmeras (indica sua posição no mapa).")
+    print("Clique sobre ele para capturar o template.")
+    print("Pressione Ctrl+C para cancelar.\n")
+
+    MARG_X, MARG_Y = 40, 30  # recorte: 80×60 px ao redor do clique
+
+    if sys.platform == "win32":
+        user32 = ctypes.windll.user32
+
+        def _pressionado():
+            return bool(user32.GetAsyncKeyState(VK_LBUTTON) & 0x8000)
+
+        while _pressionado():
+            time.sleep(0.01)
+
+        ultimo = (-1, -1)
+        try:
+            while True:
+                x, y = pyautogui.position()
+                if (x, y) != ultimo:
+                    frame = cap.capturar_tela()
+                    h, w = frame.shape[:2]
+                    if 0 <= y < h and 0 <= x < w:
+                        b, g, r = int(frame[y, x][0]), int(frame[y, x][1]), int(frame[y, x][2])
+                        print(f"\r  x={x:4d}, y={y:4d} | R={r:3d} G={g:3d} B={b:3d}   ", end="", flush=True)
+                    ultimo = (x, y)
+
+                if _pressionado():
+                    cx, cy = pyautogui.position()
+                    while _pressionado():
+                        time.sleep(0.01)
+
+                    frame = cap.capturar_tela()
+                    h, w = frame.shape[:2]
+                    x1 = max(0, cx - MARG_X)
+                    y1 = max(0, cy - MARG_Y)
+                    x2 = min(w, cx + MARG_X)
+                    y2 = min(h, cy + MARG_Y)
+
+                    recorte = cv2.cvtColor(frame[y1:y2, x1:x2], cv2.COLOR_BGR2GRAY)
+                    caminho = "src/utils/referencias/camera_aberta.png"
+                    cv2.imwrite(caminho, recorte)
+                    print(f"\nTemplate salvo: {caminho}")
+                    print(f"Tamanho: {recorte.shape[1]}x{recorte.shape[0]}px | Centro capturado: ({cx}, {cy})")
+                    return
+
+                time.sleep(0.05)
+        except KeyboardInterrupt:
+            print("\nCancelado.")
+    else:
+        input("Posicione o mouse sobre o 'YOU' e pressione Enter: ")
+        cx, cy = pyautogui.position()
+        frame = cap.capturar_tela()
+        h, w = frame.shape[:2]
+        x1 = max(0, cx - MARG_X)
+        y1 = max(0, cy - MARG_Y)
+        x2 = min(w, cx + MARG_X)
+        y2 = min(h, cy + MARG_Y)
+        recorte = cv2.cvtColor(frame[y1:y2, x1:x2], cv2.COLOR_BGR2GRAY)
+        cv2.imwrite("src/utils/referencias/camera_aberta.png", recorte)
+        print("Template salvo em src/utils/referencias/camera_aberta.png!")
+
 def capturar_coords():
     import pyautogui
     print("Movendo o mouse sobre os botões do jogo...")
@@ -51,6 +125,35 @@ def capturar_coords():
     except KeyboardInterrupt:
         print("\nPronto!")
 
+def capturar_pixel_camera():
+    """
+    Abra a câmera no jogo e mova o mouse sobre a luz vermelha piscando.
+    O valor R (vermelho) vai subir quando o mouse estiver na posição certa.
+    Pressione Ctrl+C para encerrar — a posição final é sugerida para o .env.
+    """
+    import pyautogui
+    print("Com a câmera ABERTA no jogo, mova o mouse sobre a luz vermelha piscando.")
+    print("Observe quando o valor R (vermelho) ficar alto e B/G baixos.")
+    print("Pressione Ctrl+C para encerrar.\n")
+
+    ultimo_x, ultimo_y = 0, 0
+    try:
+        while True:
+            x, y = pyautogui.position()
+            frame = cap.capturar_tela()
+            h, w = frame.shape[:2]
+            if 0 <= y < h and 0 <= x < w:
+                b, g, r = frame[y, x]
+                if x != ultimo_x or y != ultimo_y:
+                    print(f"x={x:4d}, y={y:4d} | R={r:3d} G={g:3d} B={b:3d}")
+                    ultimo_x, ultimo_y = x, y
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        print(f"\nPosição final: x={ultimo_x}, y={ultimo_y}")
+        print("Adicione ao .env:")
+        print(f"  FNAF_CAMERA_PIXEL_X={ultimo_x}")
+        print(f"  FNAF_CAMERA_PIXEL_Y={ultimo_y}")
+
 if __name__ == "__main__":
     import sys
 
@@ -60,3 +163,10 @@ if __name__ == "__main__":
         capturar_morte()
     elif sys.argv[1] == "vitoria":
         capturar_vitoria()
+    elif sys.argv[1] == "camera_aberta":
+        capturar_camera_aberta()
+    elif sys.argv[1] == "pixel_camera":
+        capturar_pixel_camera()
+    else:
+        print(f"Argumento desconhecido: {sys.argv[1]}")
+        print("Uso: python -m src.utils.calibrar [morte | vitoria | camera_aberta | pixel_camera]")

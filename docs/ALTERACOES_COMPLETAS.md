@@ -1,8 +1,6 @@
 # Alterações do ambiente — histórico técnico
 
 Documento de referência para as mudanças feitas no ambiente de RL do FNAF 1.
-Cobre duas sessões de trabalho: expansão do espaço de observação e refinamento
-de recompensas/correção de bugs.
 
 ---
 
@@ -34,17 +32,18 @@ Antes não havia simulação de energia no lado Python — o agente só via o me
 pelo pixel. Agora o ambiente rastreia `self.energia` em tempo real usando
 `time.perf_counter()` para calcular o `dt` entre atualizações.
 
-O consumo por segundo segue a lógica do jogo:
+O consumo é separado em duas parcelas: passivo (fixo) e ativo (proporcional ao
+número de itens ligados):
 
 ```
-usage = 1  # base (ventilador sempre ligado)
-usage += porta_esq + porta_dir + luz_esq + luz_dir + camera_aberta
-usage = min(usage, 4)
-consumo = usage * 0.1  # %/s
+consumo_por_segundo = 0.080 + itens_ativos * 0.120
+itens_ativos = min(porta_esq + porta_dir + luz_esq + luz_dir + camera_aberta, 3)
 ```
 
-Com todos os sistemas ativos (4 barras), a energia acaba em ~250s — bem antes dos
-535s da noite completa. Isso cria pressão real para o agente economizar.
+Com todos os sistemas ativos (3 itens no máximo), o consumo chega a 0.44%/s e a
+energia acaba em ~227s — bem antes dos 535s da noite completa. Isso cria pressão
+real para o agente economizar. Os valores foram calibrados com base nas taxas
+reais do FNAF1 (Night 1 passivo ≈ 0.104%/s; cada item adicional ≈ 0.100%/s).
 
 Quando `energia <= 0`, o ambiente desliga tudo e aguarda a morte (Freddy demora
 alguns segundos para aparecer quando a energia acaba), retornando recompensa −500.
@@ -57,8 +56,7 @@ alguns segundos para aparecer quando a energia acaba), retornando recompensa −
 
 Portas e luzes só funcionam com câmera **fechada** — no jogo real o painel de
 controle fica oculto quando a câmera está aberta. Trocar de câmera só funciona
-com câmera **aberta**. Ações inválidas retornam `False` e recebem recompensa 0
-(nem positiva nem negativa, só neutras).
+com câmera **aberta**. Ações inválidas retornam `False` e recebem recompensa −0.5.
 
 ---
 
@@ -92,6 +90,65 @@ o movimento, aumentar a duração para 0.2–0.3.
 
 ---
 
+## Sincronização de estado (câmera e portas)
+
+O ambiente mantém estado interno (`camera_aberta`, `porta_esq`, `porta_dir`) que
+pode desincronizar do jogo real por atrasos de animação, perda de clique ou
+qualquer ruído externo. Três mecanismos passivos corrigem isso sem injetar cliques
+fora da política do agente:
+
+### Template matching — câmera
+
+A cada 3 steps (fora do cooldown de abertura), `_camera_aberta_por_template()`
+roda `cv2.matchTemplate` contra o indicador "YOU" no mapa de câmeras. Uma única
+leitura discordante é descartada; duas leituras consecutivas discordantes corrigem
+`self.camera_aberta`. Isso evita falsos positivos durante a animação de transição.
+
+O template de referência (`src/utils/referencias/camera_aberta.png`) é gerado uma
+vez pelo script de calibração:
+
+```bash
+python -m src.utils.calibrar camera_aberta
+```
+
+### Pre-click — portas
+
+Imediatamente antes de toggler uma porta, o ambiente lê o pixel do botão e compara
+com o estado interno. Se a cor dominante (verde = fechada, vermelho = aberta)
+discordar, o estado interno é corrigido **antes** do toggle. Isso garante que a
+ação aplicada (abrir ou fechar) corresponde ao que o agente pretendia.
+
+### Pós-clique — portas
+
+Após clicar em uma porta, `_verificar_botao_porta()` verifica se a cor dominante
+do botão **inverteu** (verde→vermelho ou vermelho→verde). Se não tiver invertido
+em até 3 tentativas, sincroniza o estado interno pela cor lida — sem reverter às
+cegas. A verificação exige inversão de cor dominante (não apenas variação de delta),
+o que elimina falsos positivos por ruído de iluminação.
+
+### Sync passivo — luz → porta
+
+Quando o agente pressiona uma luz, o ambiente aproveita a captura de tela já feita
+para ler o pixel do botão de **porta do mesmo lado**. Se a cor dominante indicar
+estado diferente do interno, corrige silenciosamente. Nenhum clique extra é
+emitido.
+
+### Log de desyncs por episódio
+
+Ao fim de cada episódio, `_escrever_log_desyncs()` appenda uma linha em
+`logs/desyncs.log`:
+
+```
+Ep    1 | steps   584 | desfecho: morte     | SYNC camera:   2 | SYNC porta:   0 | porta falha:   1
+```
+
+- **SYNC camera**: quantas vezes o template corrigiu `camera_aberta`
+- **SYNC porta**: quantas vezes pre-click ou luz-sync corrigiram uma porta
+- **porta falha**: quantas vezes `_verificar_botao_porta` não confirmou o toggle
+  após 3 tentativas (indica clique perdido pelo jogo)
+
+---
+
 ## Correções de timing
 
 ### Timer de energia
@@ -108,7 +165,7 @@ Correção: o timer agora é definido no final do `reset()`, junto com
 
 O guard que ignora detecção nos primeiros N passos (para o jogo terminar de
 transicionar da tela de Game Over) estava em 10 passos (~2.5s). Insuficiente —
-o FNAF pode demorar mais para limpar a tela. Aumentado para 30 passos (~7.5s).
+o FNAF pode demorar mais para limpar a tela. Aumentado para 120 passos (~30s).
 Mesmo ajuste aplicado em `_detectar_vitoria`.
 
 ### Timer do episódio no log
@@ -177,7 +234,7 @@ a pressão de economia de energia ao longo de toda a noite, não só no final.
 |--------|-------|
 | Morte / energia zerada | −500 |
 | Sobreviver (6 AM) | +1000 |
-| Ação inválida | 0 |
+| Ação inválida | −0.5 |
 | Progresso na noite | 0 a +0.5 (linear) |
 | Ação repetida | −1.0 (ou −1.5 na 3ª vez para portas/luzes) |
 | Ambas as portas fechadas | −1.0/passo |
@@ -203,4 +260,5 @@ a pressão de economia de energia ao longo de toda a noite, não só no final.
 - `src/agent/multimodal_policy.py` — novo, extrator CNN + MLP
 - `src/agent/train.py` — gamma, MultiInputPolicy, timer do log corrigido
 - `src/utils/capture.py` — método `arrastar_para` com duração
-- `.env` / `.env.example` — novas variáveis de drag da câmera
+- `src/utils/calibrar.py` — comando `camera_aberta` para gerar o template de referência
+- `.env` / `.env.example` — variáveis de drag da câmera e coordenadas das ações

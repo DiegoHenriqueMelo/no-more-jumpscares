@@ -76,8 +76,14 @@ class GameCapture:
         pyautogui.moveTo(x, y)
 
     def arrastar_para(self, x: int, y: int, duration: float = 0.15):
-        """Move o mouse suavemente até (x, y) simulando um arrasto."""
+        """Move o mouse suavemente até (x, y) sem pressionar botão."""
         pyautogui.moveTo(x, y, duration=duration, tween=pyautogui.easeInOutQuad)
+
+    def arrastar_clicando(self, x_ini: int, y_ini: int, x_fim: int, y_fim: int, duration: float = 0.15):
+        """Drag real: pressiona botão esquerdo no início, move suavemente, solta no fim."""
+        pyautogui.mouseDown(x=x_ini, y=y_ini)
+        pyautogui.moveTo(x_fim, y_fim, duration=duration, tween=pyautogui.easeInOutQuad)
+        pyautogui.mouseUp()
 
     def pressionar_tecla(self, tecla: str):
         """Pressiona uma tecla do teclado."""

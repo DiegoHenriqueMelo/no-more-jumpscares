@@ -125,8 +125,8 @@ RESET_CLICK = (
 STEP_DELAY = _env_float_opcional("FNAF_STEP_DELAY", 0.25)
 SIDE_SWITCH_DELAY = _env_float_opcional("FNAF_SIDE_SWITCH_DELAY", 0.12)
 CAMERA_EXIT_DELAY = _env_float_opcional("FNAF_CAMERA_EXIT_DELAY", 0.5)
-CAMERA_DRAG_PIXELS   = _env_int_opcional("FNAF_CAMERA_DRAG_PIXELS", 80)
-CAMERA_DRAG_DURATION = _env_float_opcional("FNAF_CAMERA_DRAG_DURATION", 0.15)
+CAMERA_DRAG_PIXELS   = _env_int_opcional("FNAF_CAMERA_DRAG_PIXELS", 150)
+CAMERA_DRAG_DURATION = _env_float_opcional("FNAF_CAMERA_DRAG_DURATION", 0.25)
 
 COORDS = {
     acao: _env_coord(acao)
@@ -182,10 +182,76 @@ class FNAFEnv(gym.Env):
         self.cooldown_porta_esq       = 0  # só bloqueia porta (animação ~0.6s)
         self.cooldown_porta_dir       = 0  # só bloqueia porta (animação ~0.6s)
         self.cooldown_camera          = 0  # bloqueia abrir/fechar câmera (animação ~1.0s)
+        self._pixel_antes_porta: tuple | None = None  # (B, G, R) do botão antes do clique
+        self._template_camera_discordancia = 0  # nº de checks consecutivos discordantes
+        self._episodio_num        = 0
+        self._count_sync_camera   = 0
+        self._count_porta_falha   = 0
+        self._count_sync_porta    = 0
+        self._log_desyncs_path    = "logs/desyncs.log"
 
     def _janela_do_jogo_aberta(self) -> bool:
         import pygetwindow as gw
         return bool(gw.getWindowsWithTitle(WINDOW_TITLE))
+
+    def _camera_aberta_por_template(self) -> bool | None:
+        """Verifica estado real da câmera via matchTemplate no indicador 'YOU' do mapa.
+        Retorna None se o template não foi carregado."""
+        if self.template_camera_aberta is None:
+            return None
+        frame = self.capture.capturar_tela()
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        resultado = cv2.matchTemplate(gray, self.template_camera_aberta, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, _ = cv2.minMaxLoc(resultado)
+        return max_val > 0.75
+
+    def _verificar_botao_porta(self, nome_acao: str) -> bool:
+        """Verifica se o clique de porta registrou pelo delta de cor do botão (vermelho↔verde).
+        Tenta até 3 vezes antes de desistir. Se todas falharem, lê a cor atual para
+        sincronizar o estado interno com o que o jogo mostra em vez de reverter às cegas."""
+        if self._pixel_antes_porta is None:
+            return True
+        b1, g1, r1 = self._pixel_antes_porta
+        x, y = COORDS[nome_acao]
+
+        for tentativa in range(3):
+            frame = self.capture.capturar_tela()
+            h, w = frame.shape[:2]
+            if not (0 <= y < h and 0 <= x < w):
+                return True
+            b2, g2, r2 = int(frame[y, x][0]), int(frame[y, x][1]), int(frame[y, x][2])
+            dom_antes = "verde" if g1 > r1 + 50 else ("vermelho" if r1 > g1 + 50 else None)
+            dom_depois = "verde" if g2 > r2 + 50 else ("vermelho" if r2 > g2 + 50 else None)
+            if dom_antes is not None and dom_depois is not None and dom_antes != dom_depois:
+                return True  # cor dominante inverteu — clique registrado
+            if tentativa < 2:
+                self.capture.clicar(x, y)
+                time.sleep(0.15)
+
+        # Todas as tentativas falharam — lê estado real pela cor do botão
+        self._count_porta_falha += 1
+        if g2 > r2 + 50:        # predominantemente verde → porta fechada
+            estado_real = True
+        elif r2 > g2 + 50:      # predominantemente vermelho → porta aberta
+            estado_real = False
+        else:                   # cor ambígua — reverte conservadoramente
+            estado_real = None
+
+        if estado_real is not None:
+            if nome_acao == "porta_esquerda":
+                self.porta_esq = estado_real
+                self.cooldown_porta_esq = 0
+            else:
+                self.porta_dir = estado_real
+                self.cooldown_porta_dir = 0
+        else:
+            if nome_acao == "porta_esquerda":
+                self.porta_esq = not self.porta_esq
+                self.cooldown_porta_esq = 0
+            else:
+                self.porta_dir = not self.porta_dir
+                self.cooldown_porta_dir = 0
+        return False
 
     def _verificar_e_focar_janela(self) -> bool:
         import pygetwindow as gw
@@ -375,6 +441,12 @@ class FNAFEnv(gym.Env):
         self.cooldown_porta_esq       = 0
         self.cooldown_porta_dir       = 0
         self.cooldown_camera          = 0
+        self._pixel_antes_porta        = None
+        self._template_camera_discordancia = 0
+        self._episodio_num           += 1
+        self._count_sync_camera       = 0
+        self._count_porta_falha       = 0
+        self._count_sync_porta        = 0
 
         if not self._janela_do_jogo_aberta():
             self._abrir_jogo_fallback()
@@ -404,20 +476,52 @@ class FNAFEnv(gym.Env):
         if not self._verificar_e_focar_janela():
             return self._interromper_episodio("janela do jogo nao encontrada")
 
+        # ── Verificação de sincronia via template "YOU" do mapa de câmeras ────
+        # Checado a cada 3 steps, apenas fora do cooldown (evita falsa correção
+        # durante a animação de abertura/fechamento da tablet).
+        if self.template_camera_aberta is not None and self.passos % 3 == 0 and self.cooldown_camera == 0:
+            real = self._camera_aberta_por_template()
+            if real is not None and real != self.camera_aberta:
+                self._template_camera_discordancia += 1
+                if self._template_camera_discordancia >= 2:
+                    self.camera_aberta = real
+                    if not real:
+                        self.camera_ativa = 0
+                    self._count_sync_camera += 1
+                    self._template_camera_discordancia = 0
+            else:
+                self._template_camera_discordancia = 0
+
+        # ─────────────────────────────────────────────────────────────────────
+
         # Quando energia acabou, desliga tudo mas não encerra ainda —
         # no FNAF1 o Freddy demora alguns segundos para aparecer após a
         # energia zerar. Encerrar aqui causaria reset() durante a animação
         # de morte, corrompendo o estado do jogo. O episódio termina quando
         # _detectar_morte() confirmar via template, igual ao caminho normal.
         if self.energia <= 0:
-            self.porta_esq = False
-            self.porta_dir = False
-            self.luz_esq = False
-            self.luz_dir = False
-            self.camera_aberta = False
+            # Verificação passiva: se câmera estava aberta e YOU ainda aparece,
+            # o jogo ainda tem energia — o estado interno zerou cedo demais.
+            if (self.camera_aberta
+                    and self.template_camera_aberta is not None
+                    and self.passos % 3 == 0):
+                if self._camera_aberta_por_template():
+                    self.energia = 5.0
+            if self.energia <= 0:
+                self.porta_esq = False
+                self.porta_dir = False
+                self.luz_esq = False
+                self.luz_dir = False
+                self.camera_aberta = False
 
         acao_valida = self._executar_acao(acao)
         time.sleep(STEP_DELAY)
+
+        # Verifica cor do botão da porta após o clique: vermelho↔verde confirma registro.
+        if self._pixel_antes_porta is not None:
+            if not self._verificar_botao_porta(ACOES[acao]):
+                acao_valida = False
+            self._pixel_antes_porta = None
 
         try:
             # Captura com o botão de luz ainda pressionado — imagem mostra
@@ -453,6 +557,9 @@ class FNAFEnv(gym.Env):
         terminado  = morreu or sobreviveu
         truncado   = self.passos >= self.max_passos
 
+        if terminado or truncado:
+            self._escrever_log_desyncs(morreu, sobreviveu)
+
         info = {
             "passos":         self.passos,
             "energia":        self.energia,
@@ -484,7 +591,30 @@ class FNAFEnv(gym.Env):
         # Ações de porta/luz só funcionam quando NÃO está na câmera
         if nome_acao in ["porta_esquerda", "porta_direita", "luz_esquerda", "luz_direita"]:
             if self.camera_aberta:
-                return False  # Ação inválida - está na câmera
+                return False
+
+            if nome_acao in {"porta_esquerda", "porta_direita"}:
+                # Lê cor do botão antes do toggle para corrigir desync de estado.
+                x_pre, y_pre = COORDS[nome_acao]
+                frame_pre = self.capture.capturar_tela()
+                h_pre, w_pre = frame_pre.shape[:2]
+                if 0 <= y_pre < h_pre and 0 <= x_pre < w_pre:
+                    g_pre = int(frame_pre[y_pre, x_pre][1])
+                    r_pre = int(frame_pre[y_pre, x_pre][2])
+                    if g_pre > r_pre + 50:
+                        estado_real_pre = True   # verde → fechada
+                    elif r_pre > g_pre + 50:
+                        estado_real_pre = False  # vermelho → aberta
+                    else:
+                        estado_real_pre = None
+                    if estado_real_pre is not None:
+                        estado_atual_pre = self.porta_esq if nome_acao == "porta_esquerda" else self.porta_dir
+                        if estado_real_pre != estado_atual_pre:
+                            if nome_acao == "porta_esquerda":
+                                self.porta_esq = estado_real_pre
+                            else:
+                                self.porta_dir = estado_real_pre
+                            self._count_sync_porta += 1
 
             if nome_acao == "porta_esquerda":
                 if self.cooldown_porta_esq > 0:
@@ -518,16 +648,6 @@ class FNAFEnv(gym.Env):
                 self.luz_dir = False
                 self.luz_esq_timer = 0
                 self.luz_dir_timer = 0
-            # Arrasta o mouse para acionar a animação da prancheta.
-            # Abrir = arrasta para baixo (de cima para o botão).
-            # Fechar = arrasta para cima (de baixo para o botão).
-            if nome_acao in COORDS:
-                x, y = COORDS[nome_acao]
-                if self.camera_aberta:
-                    self.capture.mover_mouse(x, y - CAMERA_DRAG_PIXELS)
-                else:
-                    self.capture.mover_mouse(x, y + CAMERA_DRAG_PIXELS)
-                self.capture.arrastar_para(x, y, duration=CAMERA_DRAG_DURATION)
 
         # Trocar de câmera só funciona se câmera estiver aberta
         elif nome_acao.startswith("camera_"):
@@ -539,7 +659,8 @@ class FNAFEnv(gym.Env):
             x, y = COORDS[nome_acao]
 
             _saindo_camera = (self.ultima_acao in ACOES_CAMERA or
-                              self.ultima_acao == "abrir_fechar_camera")
+                              self.ultima_acao == "abrir_fechar_camera" or
+                              (not self.camera_aberta and self.cooldown_camera > 0))
             _indo_porta_luz = nome_acao in {
                 "luz_esquerda", "luz_direita", "porta_esquerda", "porta_direita"
             }
@@ -547,21 +668,70 @@ class FNAFEnv(gym.Env):
             # Saindo de qualquer ação de câmera para porta/luz OU para fechar/abrir câmera:
             # aguarda a animação da prancheta terminar antes do próximo clique.
             if _saindo_camera and (_indo_porta_luz or nome_acao == "abrir_fechar_camera"):
-                self.capture.mover_mouse(x, y)
+                # Para câmera: pré-posiciona ACIMA do botão (nunca no botão).
+                # O botão dispara o toggle por hover — mover para (x,y) causaria
+                # um toggle acidental antes do arrastar intencional (double-trigger = desync).
+                if nome_acao == "abrir_fechar_camera":
+                    self.capture.mover_mouse(x, y - CAMERA_DRAG_PIXELS)
+                else:
+                    self.capture.mover_mouse(x, y)
                 time.sleep(CAMERA_EXIT_DELAY)
             # Ao trocar de lado sem vir de câmera, aguarda a virada de cabeça.
             elif lado_alvo and self.lado_atual and lado_alvo != self.lado_atual:
-                self.capture.mover_mouse(x, y)
+                # Para câmera: não entra no hitbox do botão antes do drag intencional.
+                # O mesmo cuidado do _saindo_camera branch: posiciona ACIMA do botão.
+                if nome_acao == "abrir_fechar_camera":
+                    self.capture.mover_mouse(x, y - CAMERA_DRAG_PIXELS)
+                else:
+                    self.capture.mover_mouse(x, y)
                 time.sleep(SIDE_SWITCH_DELAY)
 
             # Re-verifica foco após qualquer delay — outros processos podem ter
             # roubado o foco durante CAMERA_EXIT_DELAY ou SIDE_SWITCH_DELAY.
             self._verificar_e_focar_janela()
 
-            if nome_acao in {"luz_esquerda", "luz_direita"}:
+            if nome_acao == "abrir_fechar_camera":
+                # Drag real: botão pressionado do início ao botão, solto no botão.
+                # mouseDown+moveTo+mouseUp = gesto inequívoco para o jogo.
+                # Exit drag sem botão pressionado — não reativa o toggle.
+                self.capture.arrastar_clicando(
+                    x, y - CAMERA_DRAG_PIXELS,
+                    x, y,
+                    duration=CAMERA_DRAG_DURATION,
+                )
+                time.sleep(0.08)
+                self.capture.arrastar_para(x, y - CAMERA_DRAG_PIXELS, duration=CAMERA_DRAG_DURATION)
+            elif nome_acao in {"luz_esquerda", "luz_direita"}:
                 self.capture.segurar_botao(x, y)
                 self._botao_luz_pressionado = (x, y)
+                # Leitura passiva da porta do mesmo lado enquanto a luz está pressionada
+                porta_nome = "porta_esquerda" if nome_acao == "luz_esquerda" else "porta_direita"
+                px_d, py_d = COORDS[porta_nome]
+                frame_luz = self.capture.capturar_tela()
+                h_luz, w_luz = frame_luz.shape[:2]
+                if 0 <= py_d < h_luz and 0 <= px_d < w_luz:
+                    gl, rl = int(frame_luz[py_d, px_d][1]), int(frame_luz[py_d, px_d][2])
+                    if gl > rl + 50:
+                        _estado_porta_real = True
+                    elif rl > gl + 50:
+                        _estado_porta_real = False
+                    else:
+                        _estado_porta_real = None
+                    if _estado_porta_real is not None:
+                        _estado_porta_atual = self.porta_esq if nome_acao == "luz_esquerda" else self.porta_dir
+                        if _estado_porta_real != _estado_porta_atual:
+                            if nome_acao == "luz_esquerda":
+                                self.porta_esq = _estado_porta_real
+                            else:
+                                self.porta_dir = _estado_porta_real
+                            self._count_sync_porta += 1
             else:
+                # Captura pixel antes do clique como referência para verificação pós-clique.
+                if nome_acao in {"porta_esquerda", "porta_direita"}:
+                    frame = self.capture.capturar_tela()
+                    h, w = frame.shape[:2]
+                    if 0 <= y < h and 0 <= x < w:
+                        self._pixel_antes_porta = (int(frame[y, x][0]), int(frame[y, x][1]), int(frame[y, x][2]))
                 self.capture.clicar(x, y)
 
             if lado_alvo:
@@ -598,15 +768,12 @@ class FNAFEnv(gym.Env):
         
         dt = agora - self.ultimo_update_energia
         
-        usage = 1
-        usage += int(self.porta_esq)
-        usage += int(self.porta_dir)
-        usage += int(self.luz_esq)
-        usage += int(self.luz_dir)
-        usage += int(self.camera_aberta)
-        usage = min(usage, 4)
-        
-        consumo_por_segundo = usage * 0.107
+        itens_ativos = (int(self.porta_esq) + int(self.porta_dir)
+                        + int(self.luz_esq) + int(self.luz_dir)
+                        + int(self.camera_aberta))
+        itens_ativos = min(itens_ativos, 3)
+
+        consumo_por_segundo = 0.080 + itens_ativos * 0.120
         self.energia -= consumo_por_segundo * dt
         self.energia = max(0.0, self.energia)
         
@@ -719,6 +886,14 @@ class FNAFEnv(gym.Env):
         morte_img, morte_nome = _ler_primeira_existente("morte.png", "morte.jpg", "morte.jpeg")
         vitoria_img, vitoria_nome = _ler_primeira_existente("vitoria.png", "vitoria.jpg", "vitoria.jpeg")
 
+        camera_img, camera_nome = _ler_primeira_existente("camera_aberta.png")
+        if camera_img is not None:
+            self.template_camera_aberta = camera_img
+            print(f"Template de câmera carregado: {camera_nome}")
+        else:
+            self.template_camera_aberta = None
+            print("Template de câmera não encontrado — execute: python -m src.utils.calibrar camera_aberta")
+
         faltando = []
         if morte_img is None:
             faltando.append("morte.(png/jpg)")
@@ -791,6 +966,20 @@ class FNAFEnv(gym.Env):
             self.contador_vitoria = 0
 
         return self.contador_vitoria >= 3
+
+    def _escrever_log_desyncs(self, morreu: bool, sobreviveu: bool) -> None:
+        os.makedirs("logs", exist_ok=True)
+        desfecho = "vitoria" if sobreviveu else ("morte" if morreu else "truncado")
+        linha = (
+            f"Ep {self._episodio_num:4d} | "
+            f"steps {self.passos:5d} | "
+            f"desfecho: {desfecho:8s} | "
+            f"SYNC camera: {self._count_sync_camera:3d} | "
+            f"SYNC porta: {self._count_sync_porta:3d} | "
+            f"porta falha: {self._count_porta_falha:3d}\n"
+        )
+        with open(self._log_desyncs_path, "a", encoding="utf-8") as f:
+            f.write(linha)
 
     def render(self):
         pass
