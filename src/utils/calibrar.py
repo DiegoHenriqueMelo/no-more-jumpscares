@@ -125,35 +125,6 @@ def capturar_coords():
     except KeyboardInterrupt:
         print("\nPronto!")
 
-def capturar_pixel_camera():
-    """
-    Abra a câmera no jogo e mova o mouse sobre a luz vermelha piscando.
-    O valor R (vermelho) vai subir quando o mouse estiver na posição certa.
-    Pressione Ctrl+C para encerrar — a posição final é sugerida para o .env.
-    """
-    import pyautogui
-    print("Com a câmera ABERTA no jogo, mova o mouse sobre a luz vermelha piscando.")
-    print("Observe quando o valor R (vermelho) ficar alto e B/G baixos.")
-    print("Pressione Ctrl+C para encerrar.\n")
-
-    ultimo_x, ultimo_y = 0, 0
-    try:
-        while True:
-            x, y = pyautogui.position()
-            frame = cap.capturar_tela()
-            h, w = frame.shape[:2]
-            if 0 <= y < h and 0 <= x < w:
-                b, g, r = frame[y, x]
-                if x != ultimo_x or y != ultimo_y:
-                    print(f"x={x:4d}, y={y:4d} | R={r:3d} G={g:3d} B={b:3d}")
-                    ultimo_x, ultimo_y = x, y
-            time.sleep(0.1)
-    except KeyboardInterrupt:
-        print(f"\nPosição final: x={ultimo_x}, y={ultimo_y}")
-        print("Adicione ao .env:")
-        print(f"  FNAF_CAMERA_PIXEL_X={ultimo_x}")
-        print(f"  FNAF_CAMERA_PIXEL_Y={ultimo_y}")
-
 if __name__ == "__main__":
     import sys
 
@@ -165,8 +136,6 @@ if __name__ == "__main__":
         capturar_vitoria()
     elif sys.argv[1] == "camera_aberta":
         capturar_camera_aberta()
-    elif sys.argv[1] == "pixel_camera":
-        capturar_pixel_camera()
     else:
         print(f"Argumento desconhecido: {sys.argv[1]}")
-        print("Uso: python -m src.utils.calibrar [morte | vitoria | camera_aberta | pixel_camera]")
+        print("Uso: python -m src.utils.calibrar [morte | vitoria | camera_aberta]")

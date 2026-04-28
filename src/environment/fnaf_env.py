@@ -803,9 +803,6 @@ class FNAFEnv(gym.Env):
         return 5.0
 
     def _calcular_recompensa(self, morreu: bool, sobreviveu: bool, acao: int, acao_valida: bool) -> float:
-        if self.energia <= 0:
-            return -500.0
-
         if morreu:
             return -500.0
 
