@@ -712,14 +712,9 @@ class FNAFEnv(gym.Env):
             self._verificar_e_focar_janela()
 
             if nome_acao == "abrir_fechar_camera":
-                # Drag real: botão pressionado do início ao botão, solto no botão.
-                # mouseDown+moveTo+mouseUp = gesto inequívoco para o jogo.
-                # Exit drag sem botão pressionado — não reativa o toggle.
-                self.capture.arrastar_clicando(
-                    x, y - CAMERA_DRAG_PIXELS,
-                    x, y,
-                    duration=CAMERA_DRAG_DURATION,
-                )
+                # Hover puro (sem mouseDown): evita que a UI de câmera capture o gesto
+                # como pan, o que impedia o toggle de registrar ao fechar a câmera.
+                self.capture.arrastar_para(x, y, duration=CAMERA_DRAG_DURATION)
                 time.sleep(0.08)
                 self.capture.arrastar_para(x, y - CAMERA_DRAG_PIXELS, duration=CAMERA_DRAG_DURATION)
             elif nome_acao in {"luz_esquerda", "luz_direita"}:
