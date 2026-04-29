@@ -14,25 +14,32 @@ pelos pixels, o que é possível mas lento e frágil.
 A mudança foi trocar para `Dict` com dois campos:
 
 - `imagem`: o frame capturado em escala de cinza, redimensionado para 84×84
-- `estados`: vetor float32 de 7 dimensões com os estados internos normalizados
+- `estados`: vetor float32 de **8 dimensões** com os estados internos normalizados
 
-Os 7 estados são, nessa ordem: `porta_esq`, `porta_dir`, `luz_esq`, `luz_dir`,
-`camera_aberta`, `camera_ativa / 11.0`, `energia / 100.0`.
+Os 8 estados são, nessa ordem: `porta_esq`, `porta_dir`, `luz_esq`, `luz_dir`,
+`camera_aberta`, `camera_ativa / 11.0`, `energia / 100.0`,
+`tempo_real_ep / 535.0`.
 
-Isso exigiu mudar a política para `MultiInputPolicy` e criar um extrator de features
-customizado (`MultimodalExtractor` em `src/agent/multimodal_policy.py`). A rede
-processa a imagem por uma CNN de 3 camadas conv e os estados por um MLP simples
-(`Linear(7→32)`), concatena os dois e passa por uma camada final de 256 unidades.
+A 8ª dimensão usa `time.perf_counter() - episode_start_time` (tempo real desde o
+início do episódio), não tempo simulado. Isso é importante porque o tempo real por
+step (~0.7s com animações) é maior que `STEP_DELAY` (~0.35s), então o tempo
+simulado acumularia apenas ~40–50% do progresso real da noite. Com tempo real, o
+agente sabe em qual hora do jogo está de fato, o que é informação relevante para
+calibrar o comportamento (Freddy quase não se move antes das 3AM; a pressão dos
+animatrônicos cresce progressivamente).
+
+`episode_start_time` é definido **após** o último sleep do `reset()`, imediatamente
+antes do primeiro step. Isso garante que o timer reflita somente o tempo de
+gameplay, sem incluir o overhead de reset (~35s).
+
+A rede processa a imagem por uma CNN de 3 camadas conv e os estados por um MLP
+(`Linear(8→32)`), concatena os dois e passa por uma camada final de 256 unidades.
 
 ---
 
 ## Sistema de energia
 
-Antes não havia simulação de energia no lado Python — o agente só via o medidor
-pelo pixel. Agora o ambiente rastreia `self.energia` em tempo real usando
-`time.perf_counter()` para calcular o `dt` entre atualizações.
-
-O consumo é separado em duas parcelas: passivo (fixo) e ativo (proporcional ao
+O consumo de energia é separado em parcela passiva (fixo) e ativa (proporcional ao
 número de itens ligados), com base nas taxas medidas do FNAF1 Night 1:
 
 ```
@@ -40,18 +47,26 @@ consumo_por_segundo = 0.104 + itens_ativos * 0.100
 itens_ativos = min(porta_esq + porta_dir + luz_esq + luz_dir + camera_aberta, 3)
 ```
 
-Com todos os sistemas ativos (3 itens), o consumo chega a 0.404%/s e a energia
-acaba em ~247s — bem antes dos 535s da noite completa. O passivo puro (0.104%/s)
-consome ~55% em uma noite inteira, deixando ~45% ao final sem nenhuma ação ativa.
+O dreno é aplicado por step usando `STEP_DELAY` como proxy de tempo:
 
-Quando `energia <= 0`, o ambiente desliga tudo e aguarda a morte (Freddy demora
-alguns segundos para aparecer quando a energia acaba), retornando recompensa −500.
+```python
+self.energia -= consumo_por_segundo * STEP_DELAY
+```
+
+Isso mantém a simulação determinística e desacoplada do wall-clock real, evitando
+que variações de latência (animações, captura de tela) distorçam o modelo de
+energia. A taxa de 0.104 + 0.100 por item foi calibrada contra o jogo real usando
+o script `src/utils/simular_energia.py`.
+
+Quando `energia <= 0`, o ambiente desliga tudo e aguarda a morte via template
+matching — o Freddy demora alguns segundos para aparecer após a energia zerar, e
+encerrar o episódio imediatamente corromperia o estado do reset.
 
 ---
 
 ## Validação de ações por contexto
 
-`_executar_acao` passou a retornar `bool` indicando se a ação teve efeito.
+`_executar_acao` retorna `bool` indicando se a ação teve efeito.
 
 Portas e luzes só funcionam com câmera **fechada** — no jogo real o painel de
 controle fica oculto quando a câmera está aberta. Trocar de câmera só funciona
@@ -160,34 +175,58 @@ Ep    1 | steps   584 | desfecho: morte     | SYNC camera:   2 | SYNC porta:   0
 
 ## Correções de timing
 
-### Timer de energia
+### Energia por STEP_DELAY em vez de wall-clock
 
-`self.ultimo_update_energia` era definido no início do `reset()`, antes dos
-~35 segundos de sleep necessários para o jogo reiniciar. Isso fazia com que o
-primeiro `_atualizar_energia()` do episódio calculasse um `dt` de ~35s,
-consumindo energia indevidamente logo no passo 1.
+A versão anterior calculava `dt = time.perf_counter() - ultimo_update_energia`,
+o que causava dois problemas: (1) o primeiro step do episódio calculava um `dt`
+de ~35s (todo o sleep do reset), consumindo energia indevidamente; (2) variações
+de latência entre steps (animações de porta, drag da câmera) distorciam o modelo
+de energia, fazendo-o drenar 2–3× mais rápido que o esperado.
 
-Correção: o timer agora é definido no final do `reset()`, junto com
-`episode_start_time`, imediatamente antes de capturar a observação inicial.
+Correção: `_atualizar_energia` usa `STEP_DELAY` como dt fixo. A energia drena
+de forma determinística e proporcional ao número de steps, independente do
+wall-clock. `ultimo_update_energia` foi removido.
 
-### Guard de detecção de morte
+### Timer do episódio
+
+`episode_start_time` era definido antes do último sleep do `reset()` (~20s de
+antecedência). Isso inflava `tempo_real` no log e deslocava os checkpoints de hora
+em ~20s. Corrigido: o timer é definido **depois** do sleep, imediatamente antes
+do primeiro step.
+
+### Guard de detecção de morte e vitória
 
 O guard que ignora detecção nos primeiros N passos (para o jogo terminar de
 transicionar da tela de Game Over) estava em 10 passos (~2.5s). Insuficiente —
 o FNAF pode demorar mais para limpar a tela. Aumentado para 120 passos (~30s).
 Mesmo ajuste aplicado em `_detectar_vitoria`.
 
-### Timer do episódio no log
+---
 
-O SB3 `DummyVecEnv` chama `env.reset()` de forma **síncrona** dentro de
-`env.step()` quando `done=True`, antes de devolver o controle ao PPO. O callback
-`_on_step` só dispara depois disso — ou seja, ~35s após o fim real do episódio.
-O campo "Tempo" no log estava inflado em ~35s por episódio. Episódios de 1 passo
-apareciam como "0.00 min" porque início e fim do timer caíam no mesmo `_on_step`.
+## Checkpoint de hora
 
-Correção: o ambiente mede `tempo_real = time.perf_counter() - episode_start_time`
-no momento em que o episódio termina e passa pelo `info`. O callback usa esse
-valor diretamente, sem depender de wall-clock próprio.
+Milestones de sobrevivência são recompensados ao atingir cada hora do jogo (1AM a
+6AM). O checkpoint usa **tempo real do episódio** (`time.perf_counter() -
+episode_start_time`) em vez de tempo simulado, pois o step real dura ~0.7s enquanto
+`STEP_DELAY` é ~0.35s — tempo simulado refletiria apenas metade do progresso real.
+
+O bônus é proporcional à energia disponível vs. a esperada para aquele horário:
+
+```python
+ratio = min(self.energia / e_cp, 1.5)
+bonus = max(ratio * 50.0, 5.0)  # floor 5, máx 75
+```
+
+| Energia no checkpoint | Ratio | Bônus |
+|-----------------------|-------|-------|
+| 0% | 0.0 | +5 (floor) |
+| Metade do esperado | 0.5 | +25 |
+| Exatamente o esperado | 1.0 | +50 |
+| 1.5× o esperado | 1.5 | +75 (cap) |
+
+O cap em 1.5× garante que mesmo os 6 checkpoints no máximo (6 × 75 = 450) não
+superem a penalidade de morte (−500), evitando que o agente aprenda a conservar
+energia passivamente ignorando ameaças.
 
 ---
 
@@ -216,9 +255,13 @@ if self.passos_sem_camera > 20:          # ~5s sem abrir câmera
     recompensa -= min(excesso * 0.05, 1.0)
 ```
 
-Os 5 segundos correspondem à mecânica real do Foxy: qualquer câmera aberta nesse
-intervalo paralisa o avanço dele. Ficar com câmera fechada além disso é
-objetivamente perigoso.
+**Survival bonus por step** garante que sobreviver mais é sempre melhor do que
+morrer cedo, mesmo com penalidades acumulando. A recompensa base por passo é +0.5,
+crescendo até +1.0 linearmente conforme o progresso da noite:
+
+```python
+recompensa = 0.5 + (self.tempo_jogo / 535.0) * 0.5
+```
 
 **Penalidades de energia por threshold fixo** (<20%, <40%) foram substituídas por
 uma penalidade graduada baseada nos thresholds recomendados do jogo por horário:
@@ -233,18 +276,17 @@ uma penalidade graduada baseada nos thresholds recomendados do jogo por horário
 | 5 AM    | 15%             |
 | 6 AM    | 5%              |
 
-A penalidade é proporcional ao déficit: `deficit * 0.02` por passo. Se o agente
-está 20% abaixo do esperado para o horário, paga −0.4 por passo. Isso distribui
-a pressão de economia de energia ao longo de toda a noite, não só no final.
+A penalidade é proporcional ao déficit: `deficit * 0.02` por passo.
 
 ### Tabela final de recompensas
 
 | Evento | Valor |
 |--------|-------|
-| Morte / energia zerada | −500 |
+| Morte | −500 |
 | Sobreviver (6 AM) | +1000 |
 | Ação inválida | −0.5 |
-| Progresso na noite | 0 a +0.5 (linear) |
+| Sobrevivência por step | +0.5 a +1.0 (cresce com progresso) |
+| Checkpoint de hora (1AM–6AM) | +5 a +75 (proporcional à margem de energia) |
 | Ação repetida | −1.0 (ou −1.5 na 3ª vez para portas/luzes) |
 | Ambas as portas fechadas | −1.0/passo |
 | Uso de luz | −0.2 |
@@ -256,18 +298,44 @@ a pressão de economia de energia ao longo de toda a noite, não só no final.
 
 ## Parâmetros de treino
 
-`gamma` foi aumentado de 0.99 para **0.995**. O motivo é numérico: uma noite tem
-~970 passos (535s ÷ 0.55s/passo). Com gamma=0.99, o +1000 de sobreviver vale
-`0.99^970 ≈ 0.06` no passo inicial — virtualmente zero. O agente não conseguia
-"enxergar" que sobreviver valia a pena. Com 0.995, vale ~7.7, 130× mais impactante.
+`gamma` foi aumentado de 0.99 para **0.995**. Com `STEP_DELAY=0.35` e step real
+~0.7s, uma noite tem ~700 steps. Com gamma=0.99, o +1000 de sobreviver vale
+`0.99^700 ≈ 0.0009` no passo inicial — virtualmente zero. Com 0.995, vale ~0.03,
+dando ao agente um sinal real para "enxergar" que sobreviver a noite vale a pena.
+
+---
+
+## Previsão de aprendizado
+
+Com `n_steps=2048` e episódios de ~600–800 steps, cada atualização de política
+cobre aproximadamente 3 episódios. Os seguintes marcos são esperados com
+treinamento contínuo:
+
+| Timesteps | Atualizações | Comportamento esperado |
+|-----------|-------------|------------------------|
+| 0–50k | 0–25 | Política aleatória. Recompensa −800 a −600. |
+| 50k–200k | 25–100 | Câmera começa a ser priorizada (penalidade de inatividade). Recompensa −600 a −400. |
+| 200k–500k | 100–244 | Economia de energia emergindo. Checkpoint 3AM possível. Recompensa −400 a −100. |
+| 500k–1M | 244–500 | Estratégia mais consistente. Fechamento de portas aprendido. Primeiras vitórias isoladas. |
+| 1M–3M | 500–1500 | Vitórias periódicas. Taxa crescendo para 10–30%. |
+| 3M+ | 1500+ | Taxa de vitória >50% possível se política convergida. |
+
+Esses marcos assumem treinamento em um único PC. Com múltiplos PCs rodando em
+paralelo e modelos combinados periodicamente, os timesteps efetivos escalam
+linearmente com o número de máquinas.
+
+As estimativas podem variar dependendo da qualidade da captura de imagem
+(iluminação, resolução da janela do jogo) e da variância introduzida pelo
+comportamento dos animatrônicos.
 
 ---
 
 ## Arquivos modificados
 
 - `src/environment/fnaf_env.py` — todas as mudanças do ambiente
-- `src/agent/multimodal_policy.py` — novo, extrator CNN + MLP
-- `src/agent/train.py` — gamma, MultiInputPolicy, timer do log corrigido
+- `src/agent/multimodal_policy.py` — extrator CNN + MLP (Linear 7→8 para 8ª dimensão)
+- `src/agent/train.py` — gamma, MultiInputPolicy, log de episódio
 - `src/utils/capture.py` — método `arrastar_para` com duração
 - `src/utils/calibrar.py` — comando `camera_aberta` para gerar o template de referência
+- `src/utils/simular_energia.py` — utilitário para calibrar e verificar taxas de energia
 - `.env` / `.env.example` — variáveis de drag da câmera e coordenadas das ações

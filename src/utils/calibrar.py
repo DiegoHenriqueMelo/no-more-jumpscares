@@ -67,11 +67,7 @@ def capturar_camera_aberta():
             while True:
                 x, y = pyautogui.position()
                 if (x, y) != ultimo:
-                    frame = cap.capturar_tela()
-                    h, w = frame.shape[:2]
-                    if 0 <= y < h and 0 <= x < w:
-                        b, g, r = int(frame[y, x][0]), int(frame[y, x][1]), int(frame[y, x][2])
-                        print(f"\r  x={x:4d}, y={y:4d} | R={r:3d} G={g:3d} B={b:3d}   ", end="", flush=True)
+                    print(f"\r  x={x:4d}, y={y:4d}   ", end="", flush=True)
                     ultimo = (x, y)
 
                 if _pressionado():

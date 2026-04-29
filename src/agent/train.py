@@ -132,7 +132,6 @@ class LogCallback(BaseCallback):
                 f"Passos: {info.get('passos', 0):6d} | "
                 f"Tempo: {tempo_ep_minutos:7.2f} min | "
                 f"Recompensa: {self.recompensa_total:8.1f} | "
-                f"BonusHora: {info.get('bonus_hora', 0.0):5.0f} | "
                 f"Taxa vitória: {taxa_vitoria:.1f}%"
             )
 
