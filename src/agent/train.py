@@ -93,7 +93,8 @@ class LogCallback(BaseCallback):
                 f"#{info.get('passos', 0):5d} | "
                 f"{acao:<20} [{valida}]"
             )
-            print(linha_step)
+            if self._log_steps:
+                print(linha_step)
             if self.arquivo_log_steps:
                 self.arquivo_log_steps.write(linha_step + "\n")
                 self.arquivo_log_steps.flush()
