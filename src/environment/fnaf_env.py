@@ -134,6 +134,17 @@ COORDS = {
     if acao != "nada"
 }
 
+# Checkpoints de energia por horário da noite (tempo em segundos, energia esperada %)
+CHECKPOINTS_NOITE = [
+    (0,   100.0),
+    (89,   85.0),   # 1AM
+    (178,  60.0),   # 2AM
+    (267,  40.0),   # 3AM
+    (356,  25.0),   # 4AM
+    (445,  15.0),   # 5AM
+    (535,   5.0),   # 6AM
+]
+
 
 class FNAFEnv(gym.Env):
     metadata = {"render_modes": ["human"]}
@@ -154,7 +165,7 @@ class FNAFEnv(gym.Env):
             ),
             "estados": spaces.Box(
                 low=0, high=1,
-                shape=(7,),
+                shape=(8,),
                 dtype=np.float32
             )
         })
@@ -174,7 +185,6 @@ class FNAFEnv(gym.Env):
         self.lado_atual = "centro"
         self.ultima_acao = None
         self.penultima_acao = None
-        self.ultimo_update_energia   = None
         self.passos_sem_camera        = 0
         self._botao_luz_pressionado   = None
         self.cooldown_porta_esq       = 0  # só bloqueia porta (animação ~0.6s)
@@ -187,6 +197,8 @@ class FNAFEnv(gym.Env):
         self._count_porta_falha   = 0
         self._count_sync_porta    = 0
         self._log_desyncs_path    = "logs/desyncs.log"
+        self._horas_bonificadas: set = set()
+        self._total_bonus_hora: float = 0.0
 
     def _janela_do_jogo_aberta(self) -> bool:
         import pygetwindow as gw
@@ -430,7 +442,6 @@ class FNAFEnv(gym.Env):
         self.ultima_acao      = None
         self.penultima_acao   = None
         self.contador_vitoria  = 0
-        self.ultimo_update_energia = None
         self.episode_start_time    = None
         self.passos_sem_camera        = 0
         self._botao_luz_pressionado   = None
@@ -443,6 +454,8 @@ class FNAFEnv(gym.Env):
         self._count_sync_camera       = 0
         self._count_porta_falha       = 0
         self._count_sync_porta        = 0
+        self._horas_bonificadas       = set()
+        self._total_bonus_hora        = 0.0
 
         if not self._janela_do_jogo_aberta():
             self._abrir_jogo_fallback()
@@ -457,10 +470,8 @@ class FNAFEnv(gym.Env):
         self.capture.clicar(*RESET_CLICK)
         time.sleep(15)
         self.capture.clicar(*RESET_CLICK)
-        agora = time.perf_counter()
-        self.ultimo_update_energia = agora
-        self.episode_start_time    = agora
         time.sleep(20)
+        self.episode_start_time = time.perf_counter()
 
         print("Reset completo — noite iniciada!")
         observacao = self._capturar_observacao()
@@ -592,6 +603,7 @@ class FNAFEnv(gym.Env):
             "morreu":         morreu,
             "acao_valida":    acao_valida,
             "acao_nome":      ACOES[acao],
+            "bonus_hora":     self._total_bonus_hora,
         }
 
         return observacao, recompensa, terminado, truncado, info
@@ -744,42 +756,23 @@ class FNAFEnv(gym.Env):
             self.cooldown_camera -= 1
     
     def _atualizar_energia(self):
-        agora = time.perf_counter()
-        if self.ultimo_update_energia is None:
-            self.ultimo_update_energia = agora
-            return
-        
-        dt = agora - self.ultimo_update_energia
-        
         itens_ativos = (int(self.porta_esq) + int(self.porta_dir)
                         + int(self.luz_esq) + int(self.luz_dir)
                         + int(self.camera_aberta))
         itens_ativos = min(itens_ativos, 3)
 
         consumo_por_segundo = 0.104 + itens_ativos * 0.100
-        self.energia -= consumo_por_segundo * dt
+        self.energia -= consumo_por_segundo * STEP_DELAY
         self.energia = max(0.0, self.energia)
-        
-        self.ultimo_update_energia = agora
     
     def _atualizar_tempo(self):
         self.tempo_jogo += STEP_DELAY
     
     def _energia_esperada(self) -> float:
-        """Energia esperada (%) com base no progresso da noite, seguindo os thresholds do jogo."""
-        checkpoints = [
-            (0,   100.0),
-            (89,   85.0),   # 1AM
-            (178,  60.0),   # 2AM
-            (267,  40.0),   # 3AM
-            (356,  25.0),   # 4AM
-            (445,  15.0),   # 5AM
-            (535,   5.0),   # 6AM
-        ]
         t = self.tempo_jogo
-        for i in range(len(checkpoints) - 1):
-            t0, e0 = checkpoints[i]
-            t1, e1 = checkpoints[i + 1]
+        for i in range(len(CHECKPOINTS_NOITE) - 1):
+            t0, e0 = CHECKPOINTS_NOITE[i]
+            t1, e1 = CHECKPOINTS_NOITE[i + 1]
             if t <= t1:
                 frac = (t - t0) / (t1 - t0)
                 return e0 + frac * (e1 - e0)
@@ -792,15 +785,26 @@ class FNAFEnv(gym.Env):
         if sobreviveu:
             return +1000.0
 
-        if not acao_valida:
-            return -0.5
+        # Bônus por checkpoint de hora — usa tempo real do episódio, não simulado,
+        # pois o tempo real por step (~0.7s) é maior que STEP_DELAY (~0.3s).
+        tempo_ep = time.perf_counter() - (self.episode_start_time or time.perf_counter())
+        bonus_hora = 0.0
+        for t_cp, e_cp in CHECKPOINTS_NOITE[1:]:
+            if t_cp not in self._horas_bonificadas and tempo_ep >= t_cp:
+                self._horas_bonificadas.add(t_cp)
+                ratio = min(self.energia / e_cp, 1.5) if e_cp > 0 else (1.0 if self.energia > 0 else 0.0)
+                bonus_hora += max(ratio * 50.0, 5.0)  # 5 a 75
+        self._total_bonus_hora += bonus_hora
 
-        # "nada" e demais ações partem de recompensa neutra
-        recompensa = 0.0
+        if not acao_valida:
+            return -0.5 + bonus_hora
+
+        # Base de sobrevivência: cada step vivo vale mais do que morrer cedo
+        recompensa = bonus_hora + 0.5
 
         # Bônus por progresso no tempo (incentiva sobreviver mais)
         progresso = self.tempo_jogo / 535.0
-        recompensa += progresso * 0.5  # até +0.5 no final
+        recompensa += progresso * 0.5  # até +0.5 adicional no final da noite
 
         nome_acao = ACOES[acao]
 
@@ -846,7 +850,8 @@ class FNAFEnv(gym.Env):
             float(self.luz_dir),
             float(self.camera_aberta),
             float(self.camera_ativa) / 11.0,
-            float(self.energia) / 100.0
+            float(self.energia) / 100.0,
+            min((time.perf_counter() - (self.episode_start_time or time.perf_counter())) / 535.0, 1.0),
         ], dtype=np.float32)
 
         return {"imagem": frame, "estados": estados}

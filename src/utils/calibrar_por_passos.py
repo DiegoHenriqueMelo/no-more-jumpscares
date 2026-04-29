@@ -115,50 +115,6 @@ def _capturar_coordenada() -> tuple[int, int]:
     return int(x), int(y)
 
 
-def _capturar_pixel_colorido() -> tuple[int, int]:
-    """Exibe cor do pixel em tempo real e captura na posição do clique."""
-    import os
-    _raiz = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    if _raiz not in sys.path:
-        sys.path.insert(0, _raiz)
-    from src.utils.capture import GameCapture
-    cap = GameCapture()
-
-    if sys.platform == "win32":
-        user32 = ctypes.windll.user32
-
-        def _pressionado() -> bool:
-            return bool(user32.GetAsyncKeyState(VK_LBUTTON) & 0x8000)
-
-        while _pressionado():
-            time.sleep(0.01)
-
-        ultimo: tuple[int, int] = (-1, -1)
-        while True:
-            x, y = pyautogui.position()
-            if (x, y) != ultimo:
-                frame = cap.capturar_tela()
-                h, w = frame.shape[:2]
-                if 0 <= y < h and 0 <= x < w:
-                    b_val, g_val, r_val = int(frame[y, x][0]), int(frame[y, x][1]), int(frame[y, x][2])
-                    print(
-                        f"\r  x={x:4d}, y={y:4d} | R={r_val:3d} G={g_val:3d} B={b_val:3d}   ",
-                        end="",
-                        flush=True,
-                    )
-                ultimo = (x, y)
-            if _pressionado():
-                x, y = pyautogui.position()
-                while _pressionado():
-                    time.sleep(0.01)
-                print()
-                return int(x), int(y)
-            time.sleep(0.05)
-    else:
-        input("Posicione o mouse na luz vermelha e pressione Enter: ")
-        x, y = pyautogui.position()
-        return int(x), int(y)
-
 
 def _imprimir_bloco_env(coords: dict[str, tuple[int, int]]) -> None:
     print("\n" + "=" * 72)
@@ -174,14 +130,6 @@ def _imprimir_bloco_env(coords: dict[str, tuple[int, int]]) -> None:
             print(f"{passo.variavel_base}_Y={y}")
             print()
 
-    if "FNAF_CAMERA_PIXEL" in coords:
-        px, py = coords["FNAF_CAMERA_PIXEL"]
-        print("# Pixel de verificacao de camera (luz vermelha piscando)")
-        print(f"FNAF_CAMERA_PIXEL_X={px}")
-        print(f"FNAF_CAMERA_PIXEL_Y={py}")
-        print()
-
-
 def executar_calibracao_guiada() -> None:
     print("Calibracao guiada por passos")
     print("Abra o jogo em modo janela e mantenha a escala do Windows em 100%.")
@@ -189,8 +137,7 @@ def executar_calibracao_guiada() -> None:
     print("Pressione Ctrl+C para cancelar a qualquer momento.")
     input("\nPressione Enter para iniciar... ")
 
-    total_coords = sum(len(passos) for _, passos in GRUPOS)
-    total_passos = total_coords + 1  # +1 para o pixel de câmera
+    total_passos = sum(len(passos) for _, passos in GRUPOS)
     atual = 1
     coords: dict[str, tuple[int, int]] = {}
 
@@ -205,15 +152,6 @@ def executar_calibracao_guiada() -> None:
             coords[passo.variavel_base] = (x, y)
             print(f"    Capturado -> x={x}, y={y}")
             atual += 1
-
-    print("\n" + "-" * 72)
-    print("Etapa: Verificacao de estado da camera")
-    print("-" * 72)
-    print(f"[{atual}/{total_passos}] Abra a CAMERA no jogo e mova o mouse sobre")
-    print("  a luz vermelha piscando. Clique quando R for alto e G/B baixos.")
-    px, py = _capturar_pixel_colorido()
-    coords["FNAF_CAMERA_PIXEL"] = (px, py)
-    print(f"    Capturado -> x={px}, y={py}")
 
     _imprimir_bloco_env(coords)
 
