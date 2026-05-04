@@ -99,7 +99,7 @@ O botão de abrir/fechar a prancheta de câmeras no FNAF só aparece quando o mo
 **se move** em direção à parte inferior da tela — um teleporte direto para as
 coordenadas não aciona a animação.
 
-A solução: antes de clicar no botão, o mouse teleporta para `CAMERA_DRAG_PIXELS`
+A solução: antes de interagir com o botão, o mouse teleporta para `CAMERA_DRAG_PIXELS`
 acima da coordenada do botão e então desliza suavemente até ele usando
 `pyautogui.moveTo(x, y, duration=CAMERA_DRAG_DURATION, tween=easeInOutQuad)`.
 Dois parâmetros configuráveis no `.env`:
@@ -109,8 +109,34 @@ FNAF_CAMERA_DRAG_PIXELS=80      # distância de partida acima do botão
 FNAF_CAMERA_DRAG_DURATION=0.15  # duração do arrasto em segundos
 ```
 
-Se o botão não aparecer, aumentar pixels para 120–150. Se o jogo não reconhecer
-o movimento, aumentar a duração para 0.2–0.3.
+### Bug: mouseDown causava captura pelo handler de pan da câmera
+
+A implementação anterior usava `arrastar_clicando` ao fechar a câmera — que executa
+`mouseDown` na posição de partida, move o mouse até o botão e depois `mouseUp`. O
+problema: quando a câmera está **aberta**, a UI do jogo registra um `mouseDown`
+dentro da área de visualização como início de pan (arrasto do mapa), capturando o
+mouse. O hover sobre o botão de toggle nunca chegava a disparar, pois o handler de
+pan consumia o evento. O estado interno do agente já havia sido atualizado para
+"câmera fechada" antes do gesto, então quando o template matching detectava a câmera
+ainda aberta, corrigia de volta — uma sequência de correções a cada episódio.
+
+O comportamento era assimétrico entre máquinas: no notebook (pc2) as coordenadas
+fazem o ponto de partida cair ligeiramente fora da área de pan, então o gesto
+funcionava. No PC de produção (pc4) as coordenadas caem dentro da área, causando a
+captura.
+
+**Correção**: o gesto foi simplificado para hover puro (`arrastar_para` =
+`pyautogui.moveTo`), sem nenhum `mouseDown`. O toggle do FNAF dispara em
+`mouseenter` (hover), não em clique, portanto pressionar o botão não é necessário.
+Sem `mouseDown`, o handler de pan nunca é ativado. O fluxo completo ficou:
+
+1. Mouse teleporta para `(x, y - CAMERA_DRAG_PIXELS)` — acima do botão
+2. `time.sleep(CAMERA_EXIT_DELAY)` — aguarda animação de saída da câmera
+3. `arrastar_para(x, y)` — hover suave até o botão, dispara toggle
+4. `time.sleep(0.08)` — pausa mínima
+5. `arrastar_para(x, y - CAMERA_DRAG_PIXELS)` — retorna para posição neutra
+
+O mesmo fluxo se aplica tanto para abrir quanto para fechar.
 
 ---
 
@@ -137,7 +163,7 @@ python -m src.utils.calibrar camera_aberta
 
 ### Pre-click — portas
 
-Imediatamente antes de toggler uma porta, o ambiente lê o pixel do botão e compara
+Imediatamente antes de togglear uma porta, o ambiente lê o pixel do botão e compara
 com o estado interno. Se a cor dominante (verde = fechada, vermelho = aberta)
 discordar, o estado interno é corrigido **antes** do toggle. Isso garante que a
 ação aplicada (abrir ou fechar) corresponde ao que o agente pretendia.
@@ -238,14 +264,6 @@ energia passivamente ignorando ameaças.
 pequenas por passo, a estratégia mais segura era não fazer nada — afinal, qualquer
 ação poderia ter penalidade. Zerado para 0.0.
 
-**Spam de "nada"** não era penalizado (havia `and nome_acao != "nada"` no check
-de repetição). Removida essa exceção — repetir "nada" agora custa −1.0 igual a
-qualquer outra ação repetida.
-
-**Penalidade por fechar porta** (−0.3 por ato) desincentivava fechar mesmo quando
-necessário. Removida. O custo de energia de ter a porta fechada já é a penalidade
-natural — o agente aprende a abrir quando o perigo passa.
-
 **Bônus fixo por câmera** (+0.4 por qualquer ação de câmera) gerava spam de troca
 de câmera sem contexto. Substituído por uma penalidade de **inatividade**:
 
@@ -276,7 +294,10 @@ uma penalidade graduada baseada nos thresholds recomendados do jogo por horário
 | 5 AM    | 15%             |
 | 6 AM    | 5%              |
 
-A penalidade é proporcional ao déficit: `deficit * 0.02` por passo.
+A penalidade é proporcional ao déficit em relação à curva esperada: `deficit * 0.02`
+por passo. Isso significa que ficar abaixo do esperado *para o horário atual* custa
+mais do que simplesmente ter energia baixa — o agente é recompensado por manter
+energia alinhada com a demanda progressiva da noite.
 
 ### Tabela final de recompensas
 
@@ -287,37 +308,141 @@ A penalidade é proporcional ao déficit: `deficit * 0.02` por passo.
 | Ação inválida | −0.5 |
 | Sobrevivência por step | +0.5 a +1.0 (cresce com progresso) |
 | Checkpoint de hora (1AM–6AM) | +5 a +75 (proporcional à margem de energia) |
-| Ação repetida | −1.0 (ou −1.5 na 3ª vez para portas/luzes) |
+| Porta ou luz repetida (2ª vez seguida) | −1.5 |
+| Câmera ou toggle repetido (2ª vez seguida) | −1.0 |
+| "nada" > 8 steps consecutivos | −0.15 × (contador − 8), máx −2.0 |
 | Ambas as portas fechadas | −1.0/passo |
 | Uso de luz | −0.2 |
-| Câmera inativa >20 passos | −0.05 × excesso (máx −1.0) |
+| Câmera inativa >20 passos | −0.05 × excesso, máx −1.0 |
 | Energia abaixo do esperado | −0.02 × déficit |
 | Limite mínimo por passo | −2.0 |
 
 ---
 
+## Penalidade por ação repetida — bugs e correções
+
+### Bug: estrutura de verificação sempre-verdadeira
+
+A penalidade de repetição usava a seguinte lógica:
+
+```python
+if nome_acao == self.ultima_acao:
+    if nome_acao in ["porta_esquerda", ...]:
+        if nome_acao == self.penultima_acao:
+            recompensa -= 1.5
+    else:
+        recompensa -= 1.0
+```
+
+O problema: `_executar_acao` define `self.ultima_acao = nome_acao` **antes** de
+`_calcular_recompensa` ser chamado. Portanto, `nome_acao == self.ultima_acao` é
+**sempre True** — o bloco `else: recompensa -= 1.0` executava em todo step que
+usasse câmera ou "nada", independente de repetição.
+
+Na prática, o agente era penalizado −1.0 em toda ação de câmera (`camera_1a`,
+`camera_2b`, etc.), tornando o uso de câmera sistematicamente desvantajoso e
+forçando o agente a evitá-las.
+
+**Correção**: o outer `if` foi removido e a lógica reestruturada para verificar
+`self.penultima_acao` (ação do step anterior) diretamente:
+
+```python
+if nome_acao in ["porta_esquerda", "porta_direita", "luz_esquerda", "luz_direita"]:
+    if nome_acao == self.penultima_acao:
+        recompensa -= 1.5
+elif nome_acao == "nada":
+    if self.contador_nada > 8:
+        recompensa -= min((self.contador_nada - 8) * 0.15, 2.0)
+elif nome_acao == self.penultima_acao:
+    recompensa -= 1.0
+```
+
+### Penalidade de "nada" — threshold em vez de flat
+
+O comportamento anterior penalizava "nada" com −1.0 em qualquer repetição, o que
+impedia o agente de descansar para conservar energia. Mas remover a penalidade
+completamente permitia um modelo anterior aprender a não fazer nada a noite
+inteira e vencer por omissão (a Noite 1 é fácil o suficiente que inação passiva
+ainda resulta em vitórias).
+
+A solução foi separar os dois casos:
+
+- **Descanso curto** (até 8 steps consecutivos de "nada" ≈ ~2s): sem penalidade
+- **Inação prolongada** (>8 steps): penalidade crescente de 0.15 por step extra,
+  cap em −2.0
+
+`contador_nada` incrementa a cada step com "nada" e reseta quando qualquer outra
+ação é executada. A penalidade combinada com a inatividade de câmera (`passos_sem_camera`)
+torna inviável ignorar o jogo por mais de 40–50 steps.
+
+---
+
 ## Parâmetros de treino
+
+### Fator de desconto (gamma)
 
 `gamma` foi aumentado de 0.99 para **0.995**. Com `STEP_DELAY=0.35` e step real
 ~0.7s, uma noite tem ~700 steps. Com gamma=0.99, o +1000 de sobreviver vale
 `0.99^700 ≈ 0.0009` no passo inicial — virtualmente zero. Com 0.995, vale ~0.03,
 dando ao agente um sinal real para "enxergar" que sobreviver a noite vale a pena.
 
+### Coeficiente de entropia (ent_coef)
+
+`ent_coef=0.01` foi adicionado. Por padrão o SB3 usa 0.0 (sem regularização de
+entropia), o que faz a política convergir para comportamento quase determinístico
+rapidamente. Com 568 episódios todos terminando em MORTE e recompensa média plana,
+o modelo tinha convergido para um padrão fixo que não explorava ações novas mesmo
+após mudanças na função de recompensa.
+
+Com `ent_coef=0.01`, a política mantém distribuição de ações mais diversa durante
+o treinamento, o que é necessário para que o agente encontre primeiras vitórias por
+exploração e receba o sinal de +1000.
+
+---
+
+## Diagnóstico do treinamento — estado atual
+
+Após ~568 episódios (todos MORTE), o modelo mostrava curva de recompensa plana sem
+convergência. Dois problemas foram identificados como causas:
+
+### 1. Reward function com câmeras sistematicamente penalizadas
+
+O bug do outer `if` (descrito acima) fazia cada ação de câmera custar −1.0. Com
+recompensa base de +0.5/step, usar câmera resultava em recompensa líquida −0.5 por
+step. O agente aprendeu a evitar câmeras quase completamente, o que deixava a
+penalidade de `passos_sem_camera` acumular — contradição irresolvível que mantinha
+a política num equilíbrio ruim.
+
+### 2. Convergência prematura sem exploração
+
+Sem `ent_coef`, a política converge para um padrão determinístico em poucas
+atualizações. Combinado com pesos pré-treinados no reward quebrado, o modelo
+reforçava a estratégia errada a cada update sem explorar alternativas.
+
+### Implicações para o treinamento futuro
+
+Dado que os pesos do modelo foram formados com reward inválido, reiniciar o
+treinamento do zero (em vez de continuar o modelo existente) oferece convergência
+mais rápida. Com a função de recompensa corrigida e `ent_coef=0.01`, espera-se
+que primeiras vitórias ocorram dentro de 100–200 episódios por exploração aleatória
+— e essas vitórias fornecem o gradiente positivo necessário para o PPO aprender a
+direção correta.
+
 ---
 
 ## Previsão de aprendizado
 
-Com `n_steps=2048` e episódios de ~600–800 steps, cada atualização de política
-cobre aproximadamente 3 episódios. Os seguintes marcos são esperados com
-treinamento contínuo:
+Com `n_steps=2048` e episódios de ~560–700 steps, cada atualização de política
+cobre aproximadamente 3–4 episódios. Os seguintes marcos são esperados com
+treinamento a partir do zero, função de recompensa corrigida e `ent_coef=0.01`:
 
 | Timesteps | Atualizações | Comportamento esperado |
 |-----------|-------------|------------------------|
-| 0–50k | 0–25 | Política aleatória. Recompensa −800 a −600. |
-| 50k–200k | 25–100 | Câmera começa a ser priorizada (penalidade de inatividade). Recompensa −600 a −400. |
+| 0–50k | 0–25 | Política aleatória. Recompensa −800 a −600. Primeiras vitórias isoladas possíveis. |
+| 50k–200k | 25–100 | Câmera começa a ser priorizada (penalidade de inatividade). Energia dura mais com descanso. Recompensa −600 a −400. |
 | 200k–500k | 100–244 | Economia de energia emergindo. Checkpoint 3AM possível. Recompensa −400 a −100. |
-| 500k–1M | 244–500 | Estratégia mais consistente. Fechamento de portas aprendido. Primeiras vitórias isoladas. |
-| 1M–3M | 500–1500 | Vitórias periódicas. Taxa crescendo para 10–30%. |
+| 500k–1M | 244–500 | Estratégia mais consistente. Fechamento de portas aprendido. Vitórias regulares. |
+| 1M–3M | 500–1500 | Taxa de vitória crescendo para 10–30%. |
 | 3M+ | 1500+ | Taxa de vitória >50% possível se política convergida. |
 
 Esses marcos assumem treinamento em um único PC. Com múltiplos PCs rodando em
@@ -333,9 +458,9 @@ comportamento dos animatrônicos.
 ## Arquivos modificados
 
 - `src/environment/fnaf_env.py` — todas as mudanças do ambiente
-- `src/agent/multimodal_policy.py` — extrator CNN + MLP (Linear 7→8 para 8ª dimensão)
-- `src/agent/train.py` — gamma, MultiInputPolicy, log de episódio
-- `src/utils/capture.py` — método `arrastar_para` com duração
+- `src/agent/multimodal_policy.py` — extrator multimodal: CNN para imagem + MLP para 8 estados
+- `src/agent/train.py` — gamma=0.995, ent_coef=0.01, MultiInputPolicy, log de episódio
+- `src/utils/capture.py` — método `arrastar_para` (hover puro, sem mouseDown)
 - `src/utils/calibrar.py` — comando `camera_aberta` para gerar o template de referência
 - `src/utils/simular_energia.py` — utilitário para calibrar e verificar taxas de energia
-- `.env` / `.env.example` — variáveis de drag da câmera e coordenadas das ações
+- `.env` / `.env.example` — variáveis de drag da câmera, coordenadas das ações, identificador de PC

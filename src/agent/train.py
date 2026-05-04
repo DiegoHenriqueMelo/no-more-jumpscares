@@ -186,6 +186,7 @@ def treinar(timesteps: int = 500_000, carregar_modelo: str = None, log_steps: bo
             batch_size=64,
             n_epochs=10,
             gamma=0.995,
+            ent_coef=0.01,
             verbose=0,
             tensorboard_log=PASTA_LOGS,
             device="auto",

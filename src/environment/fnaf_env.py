@@ -116,17 +116,17 @@ def _env_coord(acao: str) -> tuple[int, int]:
 
 WINDOW_TITLE = _env_str_obrigatorio("FNAF_WINDOW_TITLE")
 GAME_EXECUTABLE_PATH = _env_str_opcional("FNAF_EXECUTABLE_PATH", "")
-REABRIR_ESPERA_SEGUNDOS = max(1, _env_int_opcional("FNAF_REABRIR_ESPERA_SEGUNDOS", 15))
+REABRIR_ESPERA_SEGUNDOS = max(1, _env_int_opcional("FNAF_REABRIR_ESPERA_SEGUNDOS", 10))
 POS_ALT_ENTER_ESPERA_SEGUNDOS = max(1, _env_int_opcional("FNAF_POS_ALT_ENTER_ESPERA_SEGUNDOS", 3))
 RESET_CLICK = (
     _env_int_obrigatorio("FNAF_RESET_CLICK_X"),
     _env_int_obrigatorio("FNAF_RESET_CLICK_Y"),
 )
-STEP_DELAY = _env_float_opcional("FNAF_STEP_DELAY", 0.25)
-SIDE_SWITCH_DELAY = _env_float_opcional("FNAF_SIDE_SWITCH_DELAY", 0.12)
-CAMERA_EXIT_DELAY = _env_float_opcional("FNAF_CAMERA_EXIT_DELAY", 0.5)
-CAMERA_DRAG_PIXELS   = _env_int_opcional("FNAF_CAMERA_DRAG_PIXELS", 150)
-CAMERA_DRAG_DURATION = _env_float_opcional("FNAF_CAMERA_DRAG_DURATION", 0.25)
+STEP_DELAY = _env_float_opcional("FNAF_STEP_DELAY", 0.35)
+SIDE_SWITCH_DELAY = _env_float_opcional("FNAF_SIDE_SWITCH_DELAY", 0.85)
+CAMERA_EXIT_DELAY = _env_float_opcional("FNAF_CAMERA_EXIT_DELAY", 0.65)
+CAMERA_DRAG_PIXELS   = _env_int_opcional("FNAF_CAMERA_DRAG_PIXELS", 80)
+CAMERA_DRAG_DURATION = _env_float_opcional("FNAF_CAMERA_DRAG_DURATION", 0.15)
 
 COORDS = {
     acao: _env_coord(acao)
@@ -185,6 +185,7 @@ class FNAFEnv(gym.Env):
         self.lado_atual = "centro"
         self.ultima_acao = None
         self.penultima_acao = None
+        self.contador_nada = 0
         self.passos_sem_camera        = 0
         self._botao_luz_pressionado   = None
         self.cooldown_porta_esq       = 0  # só bloqueia porta (animação ~0.6s)
@@ -441,6 +442,7 @@ class FNAFEnv(gym.Env):
         self.lado_atual       = "centro"
         self.ultima_acao      = None
         self.penultima_acao   = None
+        self.contador_nada    = 0
         self.contador_vitoria  = 0
         self.episode_start_time    = None
         self.passos_sem_camera        = 0
@@ -616,6 +618,7 @@ class FNAFEnv(gym.Env):
         if nome_acao == "nada":
             self.penultima_acao = self.ultima_acao
             self.ultima_acao = nome_acao
+            self.contador_nada += 1
             return True
 
         # Ações de porta/luz só funcionam quando NÃO está na câmera
@@ -745,6 +748,7 @@ class FNAFEnv(gym.Env):
 
         self.penultima_acao = self.ultima_acao
         self.ultima_acao = nome_acao
+        self.contador_nada = 0
         return True
 
     def _atualizar_cooldowns(self):
@@ -808,13 +812,17 @@ class FNAFEnv(gym.Env):
 
         nome_acao = ACOES[acao]
 
-        # Penalidade por ação repetida — inclui "nada" para evitar passividade
-        if nome_acao == self.ultima_acao:
-            if nome_acao in ["porta_esquerda", "porta_direita", "luz_esquerda", "luz_direita"]:
-                if nome_acao == self.penultima_acao:
-                    recompensa -= 1.5  # 3x seguidas = spam
-            else:
-                recompensa -= 1.0
+        # Penalidade por ação repetida (verifica se é igual à ação do step anterior)
+        if nome_acao in ["porta_esquerda", "porta_direita", "luz_esquerda", "luz_direita"]:
+            if nome_acao == self.penultima_acao:
+                recompensa -= 1.5  # 2x seguidas = spam
+        elif nome_acao == "nada":
+            # Permite descanso até 8 steps (~2s); penaliza inação prolongada
+            if self.contador_nada > 8:
+                recompensa -= min((self.contador_nada - 8) * 0.15, 2.0)
+        elif nome_acao == self.penultima_acao:
+            # Câmera ou toggle repetidos: penaliza só quando realmente repetido
+            recompensa -= 1.0
 
         # Pequena penalidade por usar luzes (gasta energia sem observar)
         if nome_acao in ["luz_esquerda", "luz_direita"]:
