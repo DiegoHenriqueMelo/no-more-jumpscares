@@ -8,6 +8,7 @@ import unicodedata
 from pathlib import Path
 from gymnasium import spaces
 from src.utils.capture import GameCapture
+from src.environment.penalidade_repeticao import PenalidadeRepeticao
 
 def _carregar_env(caminho: str = ".env") -> None:
     if not os.path.exists(caminho):
@@ -159,6 +160,7 @@ class FNAFEnv(gym.Env):
         self.vivo      = True
         self.lado_atual = None
         self.ultima_acao = None
+        self._pen_repeticao = PenalidadeRepeticao()
 
     def _janela_do_jogo_aberta(self) -> bool:
         import pygetwindow as gw
@@ -443,6 +445,7 @@ class FNAFEnv(gym.Env):
         self.lado_atual       = None
         self.ultima_acao      = None
         self.contador_vitoria = 0
+        self._pen_repeticao.reset()
 
         if not self._janela_do_jogo_aberta():
             self._abrir_jogo_fallback()
@@ -544,6 +547,8 @@ class FNAFEnv(gym.Env):
 
         if self.porta_esq and self.porta_dir:
             recompensa -= 2.0
+
+        recompensa -= self._pen_repeticao.calcular(nome_acao)
 
         return recompensa
 

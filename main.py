@@ -14,8 +14,8 @@ def modo_treino():
     import os, glob
 
     # Prioriza o modelo merged se existir
-    if os.path.exists("modelos/fnaf_merged.zip"):
-        ultimo_modelo = "modelos/fnaf_merged.zip"
+    if os.path.exists("pc1_fnaf_ppo_220359_steps.zip"):
+        ultimo_modelo = "pc1_fnaf_ppo_220359_steps.zip"
         print("Usando modelo merged")
     else:
         modelos = glob.glob("modelos/*.zip")
