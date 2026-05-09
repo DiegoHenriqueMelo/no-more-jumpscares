@@ -35,7 +35,7 @@ def _env_str_obrigatorio(nome: str) -> str:
 
 
 class LogCallback(BaseCallback):
-    def __init__(self, log_steps: bool = False):
+    def __init__(self, log_steps: bool = False, debug_server=None):
         super().__init__()
         self.episodio          = 0
         self.episodios_validos = 0
@@ -45,6 +45,7 @@ class LogCallback(BaseCallback):
         self.recompensa_total  = 0.0
         self._pausa_disponivel = True
         self._log_steps        = log_steps
+        self._debug            = debug_server
 
         os.makedirs("logs", exist_ok=True)
         cabecalho = f"\n{'='*60}\nTreino iniciado\n{'='*60}\n"
@@ -72,7 +73,11 @@ class LogCallback(BaseCallback):
                 self._pausa_disponivel = False
 
         info = self.locals.get("infos", [{}])[0]
-        self.recompensa_total += self.locals.get("rewards", [0])[0]
+        reward_step = self.locals.get("rewards", [0])[0]
+        self.recompensa_total += reward_step
+
+        if self._debug is not None and info.get("energia") is not None:
+            self._debug.log_step(info, reward_step)
 
         energia = info.get("energia")
         if energia is not None:
@@ -138,6 +143,16 @@ class LogCallback(BaseCallback):
             print(linha)
             self.arquivo_log.write(linha + "\n")
 
+            if self._debug is not None:
+                self._debug.log_episodio(
+                    ep=self.episodio,
+                    resultado=resultado,
+                    passos=info.get("passos", 0),
+                    tempo_s=info.get("tempo_real", 0.0),
+                    recompensa=self.recompensa_total,
+                    taxa_vitoria=taxa_vitoria,
+                )
+
             ocorrido = info.get("ocorrido")
             if interrompido and ocorrido:
                 linha_ocorrido = (
@@ -161,7 +176,7 @@ class LogCallback(BaseCallback):
             self.arquivo_log_steps.close()
 
 
-def treinar(timesteps: int = 500_000, carregar_modelo: str = None, log_steps: bool = False):
+def treinar(timesteps: int = 500_000, carregar_modelo: str = None, log_steps: bool = False, debug_server=None):
     print("Iniciando ambiente FNAF1...")
     print("ATENÇÃO: Deixe o jogo aberto e na tela inicial!")
     print("Dica: segure F12 a qualquer momento para pausar.\n")
@@ -197,7 +212,7 @@ def treinar(timesteps: int = 500_000, carregar_modelo: str = None, log_steps: bo
         save_path=PASTA_MODELOS,
         name_prefix=f"{_env_str_obrigatorio('PC')}_fnaf_ppo",
     )
-    log_callback = LogCallback(log_steps=log_steps)
+    log_callback = LogCallback(log_steps=log_steps, debug_server=debug_server)
 
     print(f"Treinando por {timesteps:,} timesteps...\n")
     try:
@@ -219,6 +234,9 @@ def treinar(timesteps: int = 500_000, carregar_modelo: str = None, log_steps: bo
         caminho_final = f"{PASTA_MODELOS}/fnaf_ppo_final"
         modelo.save(caminho_final)
         print(f"\nModelo final salvo em: {caminho_final}")
+
+        if debug_server is not None:
+            debug_server.fechar()
 
         env.close()
 

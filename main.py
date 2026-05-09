@@ -17,7 +17,7 @@ def modo_teste():
     input("O jogo iniciou a noite 1? (aperta Enter para confirmar)")
     env.close()
 
-def modo_treino():
+def modo_treino(debug: bool = False):
     from src.agent.train import treinar
     import os, glob, re
 
@@ -42,15 +42,24 @@ def modo_treino():
             else:
                 print("Nenhum modelo encontrado — começando do zero")
 
-    treinar(timesteps=500_000, carregar_modelo=ultimo_modelo)
+    debug_server = None
+    if debug:
+        from src.utils.debug_server import DebugServer
+        debug_server = DebugServer()
+        print("\nJanela de debug aberta!")
+        print("Ajuste as janelas como preferir e pressione Enter para iniciar o treino...")
+        input()
+
+    treinar(timesteps=500_000, carregar_modelo=ultimo_modelo, debug_server=debug_server)
 
 if __name__ == "__main__":
-    modo = sys.argv[1] if len(sys.argv) > 1 else "teste"
+    modo  = sys.argv[1] if len(sys.argv) > 1 else "teste"
+    debug = "--debug" in sys.argv
 
     if modo == "teste":
         modo_teste()
     elif modo == "treino":
-        modo_treino()
+        modo_treino(debug=debug)
     else:
         print(f"Modo desconhecido: {modo}")
-        print("Use: python main.py teste | python main.py treino")
+        print("Use: python main.py teste | python main.py treino [--debug]")
