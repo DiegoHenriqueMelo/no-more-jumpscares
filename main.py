@@ -19,19 +19,28 @@ def modo_teste():
 
 def modo_treino():
     from src.agent.train import treinar
-    import os, glob
+    import os, glob, re
 
     merged = glob.glob("modelos/*merged*.zip")
     if merged:
         ultimo_modelo = max(merged, key=os.path.getctime)
         print(f"Usando modelo merged: {ultimo_modelo}")
     else:
-        checkpoints = glob.glob("modelos/*.zip")
-        ultimo_modelo = max(checkpoints, key=os.path.getctime) if checkpoints else None
-        if ultimo_modelo:
-            print(f"Continuando treino: {ultimo_modelo}")
+        def extrair_steps(path):
+            m = re.search(r"_(\d+)_steps\.zip$", path)
+            return int(m.group(1)) if m else -1
+
+        numerados = [p for p in glob.glob("modelos/*.zip") if extrair_steps(p) >= 0]
+        if numerados:
+            ultimo_modelo = max(numerados, key=extrair_steps)
+            print(f"Continuando treino: {ultimo_modelo} ({extrair_steps(ultimo_modelo):,} steps)")
         else:
-            print("Nenhum modelo encontrado — começando do zero")
+            outros = glob.glob("modelos/*.zip")
+            ultimo_modelo = max(outros, key=os.path.getctime) if outros else None
+            if ultimo_modelo:
+                print(f"Continuando treino (sem steps no nome): {ultimo_modelo}")
+            else:
+                print("Nenhum modelo encontrado — começando do zero")
 
     treinar(timesteps=500_000, carregar_modelo=ultimo_modelo)
 
