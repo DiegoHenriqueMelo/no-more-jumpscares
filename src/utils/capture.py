@@ -71,6 +71,10 @@ class GameCapture:
         """Pressiona uma tecla do teclado."""
         pyautogui.press(tecla)
 
+    def atalho(self, *teclas: str):
+        """Pressiona um atalho combinando varias teclas (ex.: alt+enter)."""
+        pyautogui.hotkey(*teclas)
+
 
 # ─── Teste rápido ────────────────────────────────────────────────
 if __name__ == "__main__":

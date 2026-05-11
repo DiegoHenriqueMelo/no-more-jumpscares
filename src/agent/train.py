@@ -36,8 +36,10 @@ class LogCallback(BaseCallback):
     def __init__(self):
         super().__init__()
         self.episodio         = 0
+        self.episodios_validos = 0
         self.mortes           = 0
         self.vitorias         = 0
+        self.interrompidos     = 0
         self.recompensa_total = 0.0
         self.inicio_ep        = None
         self._pausa_disponivel = True
@@ -77,15 +79,25 @@ class LogCallback(BaseCallback):
             )
 
             self.episodio += 1
+            interrompido = info.get("interrompido", False)
 
-            if info.get("morreu", False):
+            if interrompido:
+                self.interrompidos += 1
+                resultado = "INTERROMPIDO"
+            elif info.get("morreu", False):
+                self.episodios_validos += 1
                 self.mortes += 1
                 resultado = "MORTE"
             else:
+                self.episodios_validos += 1
                 self.vitorias += 1
                 resultado = "VITORIA"
 
-            taxa_vitoria = (self.vitorias / self.episodio) * 100
+            taxa_vitoria = (
+                (self.vitorias / self.episodios_validos) * 100
+                if self.episodios_validos > 0
+                else 0.0
+            )
 
             linha = (
                 f"{_env_str_obrigatorio('PC')} | "
@@ -99,6 +111,17 @@ class LogCallback(BaseCallback):
 
             print(linha)
             self.arquivo_log.write(linha + "\n")
+
+            ocorrido = info.get("ocorrido")
+            if interrompido and ocorrido:
+                linha_ocorrido = (
+                    f"{_env_str_obrigatorio('PC')} | "
+                    f"Ep {self.episodio:4d} | "
+                    f"OCORRIDO | {ocorrido}"
+                )
+                print(linha_ocorrido)
+                self.arquivo_log.write(linha_ocorrido + "\n")
+
             self.arquivo_log.flush()
             self.recompensa_total = 0.0
             self.inicio_ep = None

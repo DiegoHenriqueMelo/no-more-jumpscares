@@ -211,3 +211,7 @@ logs
 logs_analysis
 *.png
 *.jpg
+
+
+*.xlsx
+*.pbix
