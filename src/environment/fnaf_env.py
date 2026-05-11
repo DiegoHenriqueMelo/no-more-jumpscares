@@ -117,21 +117,34 @@ def _env_coord(acao: str) -> tuple[int, int]:
 
 WINDOW_TITLE = _env_str_obrigatorio("FNAF_WINDOW_TITLE")
 GAME_EXECUTABLE_PATH = _env_str_opcional("FNAF_EXECUTABLE_PATH", "")
-REABRIR_ESPERA_SEGUNDOS = max(1, _env_int_opcional("FNAF_REABRIR_ESPERA_SEGUNDOS", 15))
+REABRIR_ESPERA_SEGUNDOS = max(1, _env_int_opcional("FNAF_REABRIR_ESPERA_SEGUNDOS", 10))
 POS_ALT_ENTER_ESPERA_SEGUNDOS = max(1, _env_int_opcional("FNAF_POS_ALT_ENTER_ESPERA_SEGUNDOS", 3))
 RESET_CLICK = (
     _env_int_obrigatorio("FNAF_RESET_CLICK_X"),
     _env_int_obrigatorio("FNAF_RESET_CLICK_Y"),
 )
-STEP_DELAY = _env_float_opcional("FNAF_STEP_DELAY", 0.25)
-SIDE_SWITCH_DELAY = _env_float_opcional("FNAF_SIDE_SWITCH_DELAY", 0.12)
-CAMERA_EXIT_DELAY = _env_float_opcional("FNAF_CAMERA_EXIT_DELAY", 0.5)
+STEP_DELAY = _env_float_opcional("FNAF_STEP_DELAY", 0.35)
+SIDE_SWITCH_DELAY = _env_float_opcional("FNAF_SIDE_SWITCH_DELAY", 0.85)
+CAMERA_EXIT_DELAY = _env_float_opcional("FNAF_CAMERA_EXIT_DELAY", 0.65)
+CAMERA_DRAG_PIXELS   = _env_int_opcional("FNAF_CAMERA_DRAG_PIXELS", 80)
+CAMERA_DRAG_DURATION = _env_float_opcional("FNAF_CAMERA_DRAG_DURATION", 0.15)
 
 COORDS = {
     acao: _env_coord(acao)
     for acao in ACOES.values()
     if acao != "nada"
 }
+
+# Checkpoints de energia por horário da noite (tempo em segundos, energia esperada %)
+CHECKPOINTS_NOITE = [
+    (0,   100.0),
+    (89,   85.0),   # 1AM
+    (178,  60.0),   # 2AM
+    (267,  40.0),   # 3AM
+    (356,  25.0),   # 4AM
+    (445,  15.0),   # 5AM
+    (535,   5.0),   # 6AM
+]
 
 
 class FNAFEnv(gym.Env):
@@ -145,26 +158,126 @@ class FNAFEnv(gym.Env):
         self.contador_vitoria = 0
         self._carregar_templates()
 
-        self.observation_space = spaces.Box(
-            low=0, high=255,
-            shape=(ALTURA, LARGURA, 1),
-            dtype=np.uint8
-        )
+        self.observation_space = spaces.Dict({
+            "imagem": spaces.Box(
+                low=0, high=255,
+                shape=(ALTURA, LARGURA, 1),
+                dtype=np.uint8
+            ),
+            "estados": spaces.Box(
+                low=0, high=1,
+                shape=(8,),
+                dtype=np.float32
+            )
+        })
         self.action_space = spaces.Discrete(len(ACOES))
 
         self.passos    = 0
         self.max_passos = 10_000
         self.energia   = 100.0
+        self.tempo_jogo = 0.0
+        self.luz_esq = False
+        self.luz_dir = False
         self.porta_esq = False
         self.porta_dir = False
+        self.camera_aberta = False
+        self.camera_ativa = 0
         self.vivo      = True
-        self.lado_atual = None
+        self.lado_atual = "centro"
         self.ultima_acao = None
-        self._pen_repeticao = PenalidadeRepeticao()
+        self.penultima_acao = None
+        self.contador_nada = 0
+        self.passos_sem_camera        = 0
+        self._botao_luz_pressionado   = None
+        self.cooldown_porta_esq       = 0  # só bloqueia porta (animação ~0.6s)
+        self.cooldown_porta_dir       = 0  # só bloqueia porta (animação ~0.6s)
+        self.cooldown_camera          = 0  # bloqueia abrir/fechar câmera (animação ~1.0s)
+        self._pixel_antes_porta: tuple | None = None  # (B, G, R) do botão antes do clique
+        self._template_camera_discordancia = 0  # nº de checks consecutivos discordantes
+        self._episodio_num        = 0
+        self._count_sync_camera   = 0
+        self._count_porta_falha   = 0
+        self._count_sync_porta    = 0
+        self._log_desyncs_path    = "logs/desyncs.log"
+        self._horas_bonificadas: set = set()
+        self._total_bonus_hora: float = 0.0
 
     def _janela_do_jogo_aberta(self) -> bool:
         import pygetwindow as gw
         return bool(gw.getWindowsWithTitle(WINDOW_TITLE))
+
+    def _camera_aberta_por_template(self) -> bool | None:
+        """Verifica estado real da câmera via matchTemplate no indicador 'YOU' do mapa.
+        Retorna None se o template não foi carregado."""
+        if self.template_camera_aberta is None:
+            return None
+        frame = self.capture.capturar_tela()
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        resultado = cv2.matchTemplate(gray, self.template_camera_aberta, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, _ = cv2.minMaxLoc(resultado)
+        return max_val > 0.75
+
+    def _verificar_botao_porta(self, nome_acao: str) -> bool:
+        """Verifica se o clique de porta registrou pelo delta de cor do botão (vermelho↔verde).
+        Tenta até 3 vezes antes de desistir. Se todas falharem, lê a cor atual para
+        sincronizar o estado interno com o que o jogo mostra em vez de reverter às cegas."""
+        if self._pixel_antes_porta is None:
+            return True
+        b1, g1, r1 = self._pixel_antes_porta
+        x, y = COORDS[nome_acao]
+
+        for tentativa in range(3):
+            frame = self.capture.capturar_tela()
+            h, w = frame.shape[:2]
+            if not (0 <= y < h and 0 <= x < w):
+                return True
+            b2, g2, r2 = int(frame[y, x][0]), int(frame[y, x][1]), int(frame[y, x][2])
+            dom_antes = "verde" if g1 > r1 + 50 else ("vermelho" if r1 > g1 + 50 else None)
+            dom_depois = "verde" if g2 > r2 + 50 else ("vermelho" if r2 > g2 + 50 else None)
+            if dom_antes is not None and dom_depois is not None and dom_antes != dom_depois:
+                return True  # cor dominante inverteu — clique registrado
+            if tentativa < 2:
+                self.capture.clicar(x, y)
+                time.sleep(0.15)
+
+        # Todas as tentativas falharam — lê estado real pela cor do botão
+        self._count_porta_falha += 1
+        if g2 > r2 + 50:        # predominantemente verde → porta fechada
+            estado_real = True
+        elif r2 > g2 + 50:      # predominantemente vermelho → porta aberta
+            estado_real = False
+        else:                   # cor ambígua — reverte conservadoramente
+            estado_real = None
+
+        if estado_real is not None:
+            if nome_acao == "porta_esquerda":
+                self.porta_esq = estado_real
+                self.cooldown_porta_esq = 0
+            else:
+                self.porta_dir = estado_real
+                self.cooldown_porta_dir = 0
+        else:
+            if nome_acao == "porta_esquerda":
+                self.porta_esq = not self.porta_esq
+                self.cooldown_porta_esq = 0
+            else:
+                self.porta_dir = not self.porta_dir
+                self.cooldown_porta_dir = 0
+        return False
+
+    def _verificar_e_focar_janela(self) -> bool:
+        import pygetwindow as gw
+        janelas = gw.getWindowsWithTitle(WINDOW_TITLE)
+        if not janelas:
+            return False
+        win = janelas[0]
+        try:
+            if not win.isActive:
+                win.activate()
+                time.sleep(0.15)  # 0.15s: Windows precisa de tempo para processar o foco
+        except Exception:
+            pass
+        return True
 
     @staticmethod
     def _normalizar_texto(texto: str) -> str:
@@ -278,154 +391,34 @@ class FNAFEnv(gym.Env):
         return True
 
     def _interromper_episodio(self, motivo: str):
+        if self._botao_luz_pressionado:
+            try:
+                self.capture.soltar_botao(*self._botao_luz_pressionado)
+            except Exception:
+                pass
+            self._botao_luz_pressionado = None
+
         recuperado = self._abrir_jogo_fallback()
         if not recuperado:
             motivo = f"{motivo} (fallback sem sucesso)"
 
         info = {
-            "passos": self.passos,
-            "energia": self.energia,
-            "porta_esq": self.porta_esq,
-            "porta_dir": self.porta_dir,
-            "morreu": False,
+            "passos":       self.passos,
+            "energia":      self.energia,
+            "tempo_real":   time.perf_counter() - (self.episode_start_time or time.perf_counter()),
+            "porta_esq":    self.porta_esq,
+            "porta_dir":    self.porta_dir,
+            "camera_aberta": self.camera_aberta,
+            "camera_ativa": self.camera_ativa,
+            "morreu":       False,
             "interrompido": True,
-            "ocorrido": motivo,
+            "ocorrido":     motivo,
         }
 
-        observacao = np.zeros((ALTURA, LARGURA, 1), dtype=np.uint8)
-        return observacao, 0.0, True, False, info
-
-    def _janela_do_jogo_aberta(self) -> bool:
-        import pygetwindow as gw
-        return bool(gw.getWindowsWithTitle(WINDOW_TITLE))
-
-    @staticmethod
-    def _normalizar_texto(texto: str) -> str:
-        texto = unicodedata.normalize("NFKD", texto)
-        texto = "".join(char for char in texto if not unicodedata.combining(char))
-        return texto.lower()
-
-    @staticmethod
-    def _caminhos_desktop() -> list[Path]:
-        candidatos = [
-            Path.home() / "Desktop",
-            Path(os.getenv("USERPROFILE", "")) / "Desktop",
-            Path(os.getenv("PUBLIC", "")) / "Desktop",
-        ]
-
-        one_drive = os.getenv("OneDrive")
-        if one_drive:
-            candidatos.append(Path(one_drive) / "Desktop")
-
-        unicos: list[Path] = []
-        vistos: set[str] = set()
-        for caminho in candidatos:
-            chave = str(caminho).strip().lower()
-            if not chave or chave in vistos:
-                continue
-            vistos.add(chave)
-            unicos.append(caminho)
-        return unicos
-
-    def _descobrir_atalho_desktop(self) -> Path | None:
-        palavras_chave = ("five nights", "freddy", "fnaf")
-        extensoes_validas = {".lnk", ".url", ".exe"}
-
-        for desktop in self._caminhos_desktop():
-            if not desktop.exists() or not desktop.is_dir():
-                continue
-
-            arquivos = sorted(
-                [arquivo for arquivo in desktop.iterdir() if arquivo.is_file()],
-                key=lambda item: item.name.lower(),
-            )
-
-            for arquivo in arquivos:
-                if arquivo.suffix.lower() not in extensoes_validas:
-                    continue
-
-                nome_normalizado = self._normalizar_texto(arquivo.stem)
-                if any(chave in nome_normalizado for chave in palavras_chave):
-                    return arquivo
-
-        return None
-
-    def _resolver_caminho_jogo(self) -> Path | None:
-        if GAME_EXECUTABLE_PATH:
-            texto_expandido = os.path.expandvars(os.path.expanduser(GAME_EXECUTABLE_PATH))
-            caminho = Path(texto_expandido)
-            if caminho.exists() and caminho.is_file():
-                return caminho
-
-            nome_apenas = Path(GAME_EXECUTABLE_PATH).name
-            for desktop in self._caminhos_desktop():
-                candidato = desktop / nome_apenas
-                if candidato.exists() and candidato.is_file():
-                    return candidato
-
-            print(
-                "[FALLBACK] Caminho invalido em FNAF_EXECUTABLE_PATH: "
-                f"{GAME_EXECUTABLE_PATH}"
-            )
-
-        encontrado = self._descobrir_atalho_desktop()
-        if encontrado is not None:
-            print(f"[FALLBACK] Usando atalho detectado na area de trabalho: {encontrado}")
-        return encontrado
-
-    @staticmethod
-    def _abrir_arquivo(path_arquivo: Path) -> bool:
-        try:
-            if os.name == "nt":
-                os.startfile(str(path_arquivo))
-            else:
-                subprocess.Popen([str(path_arquivo)], cwd=str(path_arquivo.parent))
-            return True
-        except Exception:
-            return False
-
-    def _abrir_jogo_fallback(self) -> bool:
-        caminho = self._resolver_caminho_jogo()
-        if caminho is None:
-            print(
-                "[FALLBACK] Nao foi encontrado executavel/atalho do jogo. "
-                "Configure FNAF_EXECUTABLE_PATH com .exe ou .lnk."
-            )
-            return False
-
-        if not self._abrir_arquivo(caminho):
-            print(f"[FALLBACK] Falha ao abrir jogo automaticamente: {caminho}")
-            return False
-
-        print("[FALLBACK] Jogo fechado detectado. Relancando executavel...")
-        time.sleep(REABRIR_ESPERA_SEGUNDOS)
-
-        if not self.capture.focar_janela(WINDOW_TITLE):
-            print("[FALLBACK] Janela nao encontrada apos relancamento.")
-            return False
-
-        self.capture.atalho("alt", "enter")
-        time.sleep(POS_ALT_ENTER_ESPERA_SEGUNDOS)
-        self.capture.focar_janela(WINDOW_TITLE)
-        print("[FALLBACK] Jogo recolocado em modo janela (ALT+ENTER).")
-        return True
-
-    def _interromper_episodio(self, motivo: str):
-        recuperado = self._abrir_jogo_fallback()
-        if not recuperado:
-            motivo = f"{motivo} (fallback sem sucesso)"
-
-        info = {
-            "passos": self.passos,
-            "energia": self.energia,
-            "porta_esq": self.porta_esq,
-            "porta_dir": self.porta_dir,
-            "morreu": False,
-            "interrompido": True,
-            "ocorrido": motivo,
+        observacao = {
+            "imagem": np.zeros((ALTURA, LARGURA, 1), dtype=np.uint8),
+            "estados": np.zeros(7, dtype=np.float32)
         }
-
-        observacao = np.zeros((ALTURA, LARGURA, 1), dtype=np.uint8)
         return observacao, 0.0, True, False, info
 
     def reset(self, seed=None, options=None):
@@ -439,13 +432,33 @@ class FNAFEnv(gym.Env):
 
         self.passos           = 0
         self.energia          = 100.0
+        self.tempo_jogo       = 0.0
+        self.luz_esq          = False
+        self.luz_dir          = False
         self.porta_esq        = False
         self.porta_dir        = False
+        self.camera_aberta    = False
+        self.camera_ativa     = 0
         self.vivo             = True
-        self.lado_atual       = None
+        self.lado_atual       = "centro"
         self.ultima_acao      = None
-        self.contador_vitoria = 0
-        self._pen_repeticao.reset()
+        self.penultima_acao   = None
+        self.contador_nada    = 0
+        self.contador_vitoria  = 0
+        self.episode_start_time    = None
+        self.passos_sem_camera        = 0
+        self._botao_luz_pressionado   = None
+        self.cooldown_porta_esq       = 0
+        self.cooldown_porta_dir       = 0
+        self.cooldown_camera          = 0
+        self._pixel_antes_porta        = None
+        self._template_camera_discordancia = 0
+        self._episodio_num           += 1
+        self._count_sync_camera       = 0
+        self._count_porta_falha       = 0
+        self._count_sync_porta        = 0
+        self._horas_bonificadas       = set()
+        self._total_bonus_hora        = 0.0
 
         if not self._janela_do_jogo_aberta():
             self._abrir_jogo_fallback()
@@ -461,6 +474,7 @@ class FNAFEnv(gym.Env):
         time.sleep(15)
         self.capture.clicar(*RESET_CLICK)
         time.sleep(20)
+        self.episode_start_time = time.perf_counter()
 
         print("Reset completo — noite iniciada!")
         observacao = self._capturar_observacao()
@@ -469,11 +483,84 @@ class FNAFEnv(gym.Env):
     def step(self, acao: int):
         self.passos += 1
 
-        if not self._janela_do_jogo_aberta():
+        if not self._verificar_e_focar_janela():
             return self._interromper_episodio("janela do jogo nao encontrada")
 
-        self._executar_acao(acao)
+        # ── Verificação de sincronia via template "YOU" do mapa de câmeras ────
+        # Checado a cada 3 steps, apenas fora do cooldown (evita falsa correção
+        # durante a animação de abertura/fechamento da tablet).
+        if self.template_camera_aberta is not None and self.passos % 3 == 0 and self.cooldown_camera == 0:
+            real = self._camera_aberta_por_template()
+            if real is not None and real != self.camera_aberta:
+                self._template_camera_discordancia += 1
+                if self._template_camera_discordancia >= 2:
+                    self.camera_aberta = real
+                    if not real:
+                        self.camera_ativa = 0
+                    self._count_sync_camera += 1
+                    self._template_camera_discordancia = 0
+            else:
+                self._template_camera_discordancia = 0
+
+        # ─────────────────────────────────────────────────────────────────────
+
+        # Quando energia acabou, desliga tudo mas não encerra ainda —
+        # no FNAF1 o Freddy demora alguns segundos para aparecer após a
+        # energia zerar. Encerrar aqui causaria reset() durante a animação
+        # de morte, corrompendo o estado do jogo. O episódio termina quando
+        # _detectar_morte() confirmar via template, igual ao caminho normal.
+        if self.energia <= 0:
+            # Verificação passiva: se câmera estava aberta e YOU ainda aparece,
+            # o jogo ainda tem energia — o estado interno zerou cedo demais.
+            if (self.camera_aberta
+                    and self.template_camera_aberta is not None
+                    and self.passos % 3 == 0):
+                if self._camera_aberta_por_template():
+                    self.energia = 5.0
+            if self.energia <= 0:
+                self.porta_esq = False
+                self.porta_dir = False
+                self.luz_esq = False
+                self.luz_dir = False
+                self.camera_aberta = False
+
+        acao_valida = self._executar_acao(acao)
         time.sleep(STEP_DELAY)
+
+        # Verifica cor do botão da porta após o clique: vermelho↔verde confirma registro.
+        if self._pixel_antes_porta is not None:
+            if not self._verificar_botao_porta(ACOES[acao]):
+                acao_valida = False
+            self._pixel_antes_porta = None
+
+        # Pressiona o botão de luz ativa antes de capturar a observação —
+        # mantém o corredor iluminado na imagem e sincroniza passivamente a porta do mesmo lado.
+        if self.luz_esq:
+            lx, ly = COORDS["luz_esquerda"]
+            self.capture.segurar_botao(lx, ly)
+            self._botao_luz_pressionado = (lx, ly)
+            _frame_l = self.capture.capturar_tela()
+            _px, _py = COORDS["porta_esquerda"]
+            _h, _w = _frame_l.shape[:2]
+            if 0 <= _py < _h and 0 <= _px < _w:
+                _gl, _rl = int(_frame_l[_py, _px][1]), int(_frame_l[_py, _px][2])
+                _real = True if _gl > _rl + 50 else (False if _rl > _gl + 50 else None)
+                if _real is not None and _real != self.porta_esq:
+                    self.porta_esq = _real
+                    self._count_sync_porta += 1
+        elif self.luz_dir:
+            lx, ly = COORDS["luz_direita"]
+            self.capture.segurar_botao(lx, ly)
+            self._botao_luz_pressionado = (lx, ly)
+            _frame_l = self.capture.capturar_tela()
+            _px, _py = COORDS["porta_direita"]
+            _h, _w = _frame_l.shape[:2]
+            if 0 <= _py < _h and 0 <= _px < _w:
+                _gl, _rl = int(_frame_l[_py, _px][1]), int(_frame_l[_py, _px][2])
+                _real = True if _gl > _rl + 50 else (False if _rl > _gl + 50 else None)
+                if _real is not None and _real != self.porta_dir:
+                    self.porta_dir = _real
+                    self._count_sync_porta += 1
 
         try:
             observacao = self._capturar_observacao()
@@ -482,82 +569,303 @@ class FNAFEnv(gym.Env):
         except Exception as erro:
             return self._interromper_episodio(f"falha ao capturar estado: {erro}")
 
-        recompensa = self._calcular_recompensa(morreu, sobreviveu, acao)
+        if self._botao_luz_pressionado:
+            self.capture.soltar_botao(*self._botao_luz_pressionado)
+            self._botao_luz_pressionado = None
+
+        luz_esq_step = self.luz_esq
+        luz_dir_step = self.luz_dir
+
+        self._atualizar_energia()
+        self._atualizar_cooldowns()
+        self._atualizar_tempo()
+
+        if self.camera_aberta:
+            self.passos_sem_camera = 0
+        else:
+            self.passos_sem_camera += 1
+
+        recompensa = self._calcular_recompensa(morreu, sobreviveu, acao, acao_valida)
         terminado  = morreu or sobreviveu
         truncado   = self.passos >= self.max_passos
 
+        if terminado or truncado:
+            self._escrever_log_desyncs(morreu, sobreviveu)
+
         info = {
-            "passos":    self.passos,
-            "energia":   self.energia,
-            "porta_esq": self.porta_esq,
-            "porta_dir": self.porta_dir,
-            "morreu":    morreu,
+            "passos":         self.passos,
+            "energia":        self.energia,
+            "tempo":          self.tempo_jogo,
+            "tempo_real":     time.perf_counter() - (self.episode_start_time or time.perf_counter()),
+            "luz_esq":        luz_esq_step,
+            "luz_dir":        luz_dir_step,
+            "porta_esq":      self.porta_esq,
+            "porta_dir":      self.porta_dir,
+            "camera_aberta":  self.camera_aberta,
+            "camera_ativa":   self.camera_ativa,
+            "morreu":         morreu,
+            "acao_valida":    acao_valida,
+            "acao_nome":      ACOES[acao],
+            "bonus_hora":     self._total_bonus_hora,
         }
 
         return observacao, recompensa, terminado, truncado, info
 
-    def _executar_acao(self, acao: int):
+    def _executar_acao(self, acao: int) -> bool:
+        """Executa ação e retorna True se teve efeito, False se foi inválida."""
         nome_acao = ACOES[acao]
         lado_alvo = LADO_POR_ACAO.get(nome_acao)
 
         if nome_acao == "nada":
-            return
+            self.penultima_acao = self.ultima_acao
+            self.ultima_acao = nome_acao
+            self.contador_nada += 1
+            return True
 
-        if nome_acao == "porta_esquerda":
-            self.porta_esq = not self.porta_esq
+        # Ações de porta/luz só funcionam quando NÃO está na câmera
+        if nome_acao in ["porta_esquerda", "porta_direita", "luz_esquerda", "luz_direita"]:
+            if self.camera_aberta:
+                return False
 
-        if nome_acao == "porta_direita":
-            self.porta_dir = not self.porta_dir
+            if nome_acao in {"porta_esquerda", "porta_direita"}:
+                # Lê cor do botão antes do toggle para corrigir desync de estado.
+                x_pre, y_pre = COORDS[nome_acao]
+                frame_pre = self.capture.capturar_tela()
+                h_pre, w_pre = frame_pre.shape[:2]
+                if 0 <= y_pre < h_pre and 0 <= x_pre < w_pre:
+                    g_pre = int(frame_pre[y_pre, x_pre][1])
+                    r_pre = int(frame_pre[y_pre, x_pre][2])
+                    if g_pre > r_pre + 50:
+                        estado_real_pre = True   # verde → fechada
+                    elif r_pre > g_pre + 50:
+                        estado_real_pre = False  # vermelho → aberta
+                    else:
+                        estado_real_pre = None
+                    if estado_real_pre is not None:
+                        estado_atual_pre = self.porta_esq if nome_acao == "porta_esquerda" else self.porta_dir
+                        if estado_real_pre != estado_atual_pre:
+                            if nome_acao == "porta_esquerda":
+                                self.porta_esq = estado_real_pre
+                            else:
+                                self.porta_dir = estado_real_pre
+                            self._count_sync_porta += 1
+
+            if nome_acao == "porta_esquerda":
+                if self.cooldown_porta_esq > 0:
+                    return False
+                self.porta_esq = not self.porta_esq
+                self.cooldown_porta_esq = 3  # 3 steps × 0.25s = 0.75s — cobre animação da porta
+            elif nome_acao == "porta_direita":
+                if self.cooldown_porta_dir > 0:
+                    return False
+                self.porta_dir = not self.porta_dir
+                self.cooldown_porta_dir = 3
+            elif nome_acao == "luz_esquerda":
+                if self.luz_esq:
+                    self.luz_esq = False
+                else:
+                    self.luz_dir = False  # só uma luz por vez
+                    self.luz_esq = True
+            elif nome_acao == "luz_direita":
+                if self.luz_dir:
+                    self.luz_dir = False
+                else:
+                    self.luz_esq = False  # só uma luz por vez
+                    self.luz_dir = True
+
+        # Abrir/fechar câmera — bloqueado durante cooldown para aguardar animação (~1.0s)
+        elif nome_acao == "abrir_fechar_camera":
+            if self.cooldown_camera > 0:
+                return False
+            self.camera_aberta = not self.camera_aberta
+            self.cooldown_camera = 4  # 4 steps × 0.25s = 1.0s — cobre animação completa
+            if not self.camera_aberta:
+                self.camera_ativa = 0
+            # Ao abrir câmera, desliga luzes
+            if self.camera_aberta:
+                self.luz_esq = False
+                self.luz_dir = False
+
+        # Trocar de câmera só funciona se câmera estiver aberta
+        elif nome_acao.startswith("camera_"):
+            if not self.camera_aberta:
+                return False  # Ação inválida - câmera fechada
+            self.camera_ativa = acao - 5
 
         if nome_acao in COORDS:
             x, y = COORDS[nome_acao]
 
-            # Ao trocar de lado, move antes e espera um pouco para o jogo
-            # finalizar a transicao de camera antes do clique real.
-            if lado_alvo and self.lado_atual and lado_alvo != self.lado_atual:
-                self.capture.mover_mouse(x, y)
-                time.sleep(SIDE_SWITCH_DELAY)
-            # Ao sair das cameras para luz/porta direita, espera para a camera acompanhar
-            elif self.ultima_acao in ACOES_CAMERA and nome_acao in {"luz_direita", "porta_direita"}:
-                self.capture.mover_mouse(x, y)
-                time.sleep(CAMERA_EXIT_DELAY)
+            _saindo_camera = (self.ultima_acao in ACOES_CAMERA or
+                              self.ultima_acao == "abrir_fechar_camera" or
+                              (not self.camera_aberta and self.cooldown_camera > 0))
+            _indo_porta_luz = nome_acao in {
+                "luz_esquerda", "luz_direita", "porta_esquerda", "porta_direita"
+            }
 
-            self.capture.clicar(x, y)
+            # Saindo de qualquer ação de câmera para porta/luz OU para fechar/abrir câmera:
+            # aguarda a animação da prancheta terminar antes do próximo clique.
+            if _saindo_camera and (_indo_porta_luz or nome_acao == "abrir_fechar_camera"):
+                # Para câmera: pré-posiciona ACIMA do botão (nunca no botão).
+                # O botão dispara o toggle por hover — mover para (x,y) causaria
+                # um toggle acidental antes do arrastar intencional (double-trigger = desync).
+                if nome_acao == "abrir_fechar_camera":
+                    self.capture.mover_mouse(x, y - CAMERA_DRAG_PIXELS)
+                else:
+                    self.capture.mover_mouse(x, y)
+                time.sleep(CAMERA_EXIT_DELAY)
+            # Ao trocar de lado sem vir de câmera, aguarda a virada de cabeça.
+            elif lado_alvo and self.lado_atual and lado_alvo != self.lado_atual:
+                # Para câmera: não entra no hitbox do botão antes do drag intencional.
+                # O mesmo cuidado do _saindo_camera branch: posiciona ACIMA do botão.
+                if nome_acao == "abrir_fechar_camera":
+                    self.capture.mover_mouse(x, y - CAMERA_DRAG_PIXELS)
+                else:
+                    self.capture.mover_mouse(x, y)
+                time.sleep(SIDE_SWITCH_DELAY)
+
+            # Re-verifica foco após qualquer delay — outros processos podem ter
+            # roubado o foco durante CAMERA_EXIT_DELAY ou SIDE_SWITCH_DELAY.
+            self._verificar_e_focar_janela()
+
+            if nome_acao == "abrir_fechar_camera":
+                # Hover puro (sem mouseDown): evita que a UI de câmera capture o gesto
+                # como pan, o que impedia o toggle de registrar ao fechar a câmera.
+                self.capture.arrastar_para(x, y, duration=CAMERA_DRAG_DURATION)
+                time.sleep(0.08)
+                self.capture.arrastar_para(x, y - CAMERA_DRAG_PIXELS, duration=CAMERA_DRAG_DURATION)
+            elif nome_acao in {"luz_esquerda", "luz_direita"}:
+                pass  # press e SYNC-LUZ acontecem em step() antes da observação
+            else:
+                # Captura pixel antes do clique como referência para verificação pós-clique.
+                if nome_acao in {"porta_esquerda", "porta_direita"}:
+                    frame = self.capture.capturar_tela()
+                    h, w = frame.shape[:2]
+                    if 0 <= y < h and 0 <= x < w:
+                        self._pixel_antes_porta = (int(frame[y, x][0]), int(frame[y, x][1]), int(frame[y, x][2]))
+                self.capture.clicar(x, y)
 
             if lado_alvo:
                 self.lado_atual = lado_alvo
 
+        self.penultima_acao = self.ultima_acao
         self.ultima_acao = nome_acao
+        self.contador_nada = 0
+        return True
 
-    def _calcular_recompensa(self, morreu: bool, sobreviveu: bool, acao: int) -> float:
+    def _atualizar_cooldowns(self):
+        if self.cooldown_porta_esq > 0:
+            self.cooldown_porta_esq -= 1
+        if self.cooldown_porta_dir > 0:
+            self.cooldown_porta_dir -= 1
+        if self.cooldown_camera > 0:
+            self.cooldown_camera -= 1
+    
+    def _atualizar_energia(self):
+        itens_ativos = (int(self.porta_esq) + int(self.porta_dir)
+                        + int(self.luz_esq) + int(self.luz_dir)
+                        + int(self.camera_aberta))
+        itens_ativos = min(itens_ativos, 3)
+
+        consumo_por_segundo = 0.104 + itens_ativos * 0.100
+        self.energia -= consumo_por_segundo * STEP_DELAY
+        self.energia = max(0.0, self.energia)
+    
+    def _atualizar_tempo(self):
+        self.tempo_jogo += STEP_DELAY
+    
+    def _energia_esperada(self) -> float:
+        t = self.tempo_jogo
+        for i in range(len(CHECKPOINTS_NOITE) - 1):
+            t0, e0 = CHECKPOINTS_NOITE[i]
+            t1, e1 = CHECKPOINTS_NOITE[i + 1]
+            if t <= t1:
+                frac = (t - t0) / (t1 - t0)
+                return e0 + frac * (e1 - e0)
+        return 5.0
+
+    def _calcular_recompensa(self, morreu: bool, sobreviveu: bool, acao: int, acao_valida: bool) -> float:
         if morreu:
             return -500.0
 
         if sobreviveu:
             return +1000.0
 
-        recompensa = +1.0
-        nome_acao  = ACOES[acao]
+        # Bônus por checkpoint de hora — usa tempo real do episódio, não simulado,
+        # pois o tempo real por step (~0.7s) é maior que STEP_DELAY (~0.3s).
+        tempo_ep = time.perf_counter() - (self.episode_start_time or time.perf_counter())
+        bonus_hora = 0.0
+        for t_cp, e_cp in CHECKPOINTS_NOITE[1:]:
+            if t_cp not in self._horas_bonificadas and tempo_ep >= t_cp:
+                self._horas_bonificadas.add(t_cp)
+                ratio = min(self.energia / e_cp, 1.5) if e_cp > 0 else (1.0 if self.energia > 0 else 0.0)
+                bonus_hora += max(ratio * 50.0, 5.0)  # 5 a 75
+        self._total_bonus_hora += bonus_hora
 
-        if nome_acao in ["porta_esquerda", "porta_direita"]:
-            recompensa -= 0.5
+        if not acao_valida:
+            return -0.5 + bonus_hora
 
+        # Base de sobrevivência: cada step vivo vale mais do que morrer cedo
+        recompensa = bonus_hora + 0.5
+
+        # Bônus por progresso no tempo (incentiva sobreviver mais)
+        progresso = self.tempo_jogo / 535.0
+        recompensa += progresso * 0.5  # até +0.5 adicional no final da noite
+
+        nome_acao = ACOES[acao]
+
+        # Penalidade por ação repetida (verifica se é igual à ação do step anterior)
+        if nome_acao in ["porta_esquerda", "porta_direita", "luz_esquerda", "luz_direita"]:
+            if nome_acao == self.penultima_acao:
+                recompensa -= 1.5  # 2x seguidas = spam
+        elif nome_acao == "nada":
+            # Permite descanso até 8 steps (~2s); penaliza inação prolongada
+            if self.contador_nada > 8:
+                recompensa -= min((self.contador_nada - 8) * 0.15, 2.0)
+        elif nome_acao == self.penultima_acao:
+            # Câmera ou toggle repetidos: penaliza só quando realmente repetido
+            recompensa -= 1.0
+
+        # Pequena penalidade por usar luzes (gasta energia sem observar)
         if nome_acao in ["luz_esquerda", "luz_direita"]:
-            recompensa -= 0.3
+            recompensa -= 0.2
 
+        # Penalidade por ter ambas as portas fechadas (raramente necessário)
         if self.porta_esq and self.porta_dir:
-            recompensa -= 2.0
+            recompensa -= 1.0
+
+        # Penalidade por inatividade da câmera — Foxy corre a cada ~5s sem câmera
+        if self.passos_sem_camera > 20:
+            excesso = self.passos_sem_camera - 20
+            recompensa -= min(excesso * 0.05, 1.0)
+
+        # Penalidade por energia abaixo do esperado para o momento da noite
+        deficit = max(0.0, self._energia_esperada() - self.energia)
+        recompensa -= deficit * 0.02
+
+        recompensa = max(recompensa, -2.0)
 
         recompensa -= self._pen_repeticao.calcular(nome_acao)
 
         return recompensa
 
-    def _capturar_observacao(self) -> np.ndarray:
+    def _capturar_observacao(self) -> dict:
         frame = self.capture.capturar_tela()
         frame = self.capture.redimensionar(frame, LARGURA, ALTURA)
         frame = self.capture.para_escala_cinza(frame)
         frame = np.expand_dims(frame, axis=-1)
-        return frame
+
+        estados = np.array([
+            float(self.porta_esq),
+            float(self.porta_dir),
+            float(self.luz_esq),
+            float(self.luz_dir),
+            float(self.camera_aberta),
+            float(self.camera_ativa) / 11.0,
+            float(self.energia) / 100.0,
+            min((time.perf_counter() - (self.episode_start_time or time.perf_counter())) / 535.0, 1.0),
+        ], dtype=np.float32)
+
+        return {"imagem": frame, "estados": estados}
 
     def _carregar_templates(self):
         refs = Path(__file__).parent.parent / "utils" / "referencias"
@@ -573,6 +881,14 @@ class FNAFEnv(gym.Env):
 
         morte_img, morte_nome = _ler_primeira_existente("morte.png", "morte.jpg", "morte.jpeg")
         vitoria_img, vitoria_nome = _ler_primeira_existente("vitoria.png", "vitoria.jpg", "vitoria.jpeg")
+
+        camera_img, camera_nome = _ler_primeira_existente("camera_aberta.png")
+        if camera_img is not None:
+            self.template_camera_aberta = camera_img
+            print(f"Template de câmera carregado: {camera_nome}")
+        else:
+            self.template_camera_aberta = None
+            print("Template de câmera não encontrado — execute: python -m src.utils.calibrar camera_aberta")
 
         faltando = []
         if morte_img is None:
@@ -620,12 +936,22 @@ class FNAFEnv(gym.Env):
         return cv2.resize(cinza, self._ref_size)
 
     def _detectar_morte(self) -> bool:
+        # Ignora detecção nos primeiros 120 passos (~30s de episódio / ~60s de jogo
+        # real contando o reset) para evitar detectar a tela de Game Over do episódio
+        # anterior, que pode persistir durante a transição de reset.
+        if self.passos < 120:
+            return False
+        
         frame = self._capturar_janela()
         resultado = cv2.matchTemplate(frame, self.template_morte, cv2.TM_CCOEFF_NORMED)
         _, max_val, _, _ = cv2.minMaxLoc(resultado)
         return float(max_val) > 0.70
 
     def _detectar_vitoria(self) -> bool:
+        # Ignora detecção nos primeiros 30 passos (~7.5s) para o jogo terminar de carregar
+        if self.passos < 30:
+            return False
+        
         frame = self._capturar_janela()
         resultado = cv2.matchTemplate(frame, self.template_vitoria, cv2.TM_CCOEFF_NORMED)
         _, max_val, _, _ = cv2.minMaxLoc(resultado)
@@ -636,6 +962,20 @@ class FNAFEnv(gym.Env):
             self.contador_vitoria = 0
 
         return self.contador_vitoria >= 3
+
+    def _escrever_log_desyncs(self, morreu: bool, sobreviveu: bool) -> None:
+        os.makedirs("logs", exist_ok=True)
+        desfecho = "vitoria" if sobreviveu else ("morte" if morreu else "truncado")
+        linha = (
+            f"Ep {self._episodio_num:4d} | "
+            f"steps {self.passos:5d} | "
+            f"desfecho: {desfecho:8s} | "
+            f"SYNC camera: {self._count_sync_camera:3d} | "
+            f"SYNC porta: {self._count_sync_porta:3d} | "
+            f"porta falha: {self._count_porta_falha:3d}\n"
+        )
+        with open(self._log_desyncs_path, "a", encoding="utf-8") as f:
+            f.write(linha)
 
     def render(self):
         pass

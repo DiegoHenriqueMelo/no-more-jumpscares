@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(python -c ' *)",
-      "Bash(python -c \"import urllib.request; print\\(urllib.request.urlopen\\('https://api.ipify.org'\\).read\\(\\).decode\\(\\)\\)\")"
+      "Bash(python -c \"import urllib.request; print\\(urllib.request.urlopen\\('https://api.ipify.org'\\).read\\(\\).decode\\(\\)\\)\")",
+      "WebSearch",
+      "Bash(git pull *)"
     ]
   }
 }

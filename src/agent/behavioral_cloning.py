@@ -7,6 +7,7 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from stable_baselines3 import PPO
 from src.environment.fnaf_env import FNAFEnv
+from src.agent.multimodal_policy import MultimodalExtractor
 from pathlib import Path
 from collections import Counter
 
@@ -38,15 +39,30 @@ class GameplayDataset(Dataset):
     def __getitem__(self, idx):
         dado = self.dados[idx]
 
+        # Carrega imagem
         frame = cv2.imread(dado["frame"], cv2.IMREAD_GRAYSCALE)
         if frame is None:
             frame = np.zeros((84, 84), dtype=np.uint8)
+        frame = np.expand_dims(frame, axis=-1)  # (84, 84, 1)
 
-        frame = frame.astype(np.float32) / 255.0
-        frame = np.expand_dims(frame, axis=0)
+        # Estados: usa valores do JSON se existirem, senão usa zeros
+        estados = np.array([
+            float(dado.get("porta_esq", 0)),
+            float(dado.get("porta_dir", 0)),
+            float(dado.get("luz_esq", 0)),
+            float(dado.get("luz_dir", 0)),
+            float(dado.get("camera_aberta", 0)),
+            float(dado.get("camera_ativa", 0)) / 11.0,
+            float(dado.get("energia", 100)) / 100.0,
+        ], dtype=np.float32)
 
         acao = int(dado["acao"])
-        return torch.FloatTensor(frame), torch.LongTensor([acao])[0]
+        
+        obs = {
+            "imagem": torch.ByteTensor(frame),
+            "estados": torch.FloatTensor(estados)
+        }
+        return obs, torch.LongTensor([acao])[0]
 
 
 def treinar_bc(caminhos_json: list[str], epochs: int = 50, lr: float = 1e-3):
@@ -55,11 +71,17 @@ def treinar_bc(caminhos_json: list[str], epochs: int = 50, lr: float = 1e-3):
     dataset = GameplayDataset(caminhos_json)
     loader  = DataLoader(dataset, batch_size=32, shuffle=True)
 
-    print("\nCriando modelo PPO...")
-    env    = FNAFEnv()
+    print("\nCriando modelo PPO com arquitetura multimodal...")
+    env = FNAFEnv()
+    
+    policy_kwargs = dict(
+        features_extractor_class=MultimodalExtractor,
+    )
+    
     modelo = PPO(
-        policy="CnnPolicy",
+        policy="MultiInputPolicy",
         env=env,
+        policy_kwargs=policy_kwargs,
         learning_rate=1e-4,
         verbose=0,
         device="auto",
@@ -75,11 +97,15 @@ def treinar_bc(caminhos_json: list[str], epochs: int = 50, lr: float = 1e-3):
         total_certo = 0
         total       = 0
 
-        for frames, acoes in loader:
-            frames = frames.to(modelo.device)
-            acoes  = acoes.to(modelo.device)
+        for obs_batch, acoes in loader:
+            # Move observações para device
+            obs_device = {
+                "imagem": obs_batch["imagem"].to(modelo.device),
+                "estados": obs_batch["estados"].to(modelo.device)
+            }
+            acoes = acoes.to(modelo.device)
 
-            distribution = policy.get_distribution(frames)
+            distribution = policy.get_distribution(obs_device)
             log_probs    = distribution.log_prob(acoes)
             loss         = -log_probs.mean()
 

@@ -4,27 +4,43 @@ from src.environment.fnaf_env import FNAFEnv
 def modo_teste():
     print("Testando reset...")
     env = FNAFEnv()
-    obs, info = env.reset()
-    print(f"Reset OK! Shape: {obs.shape}")
+    obs, _ = env.reset()
+    print(f"Reset OK! Imagem: {obs['imagem'].shape}, Estados: {obs['estados'].shape}")
+    print(f"Estados iniciais:")
+    print(f"  - Porta esquerda: {obs['estados'][0]}")
+    print(f"  - Porta direita: {obs['estados'][1]}")
+    print(f"  - Luz esquerda: {obs['estados'][2]}")
+    print(f"  - Luz direita: {obs['estados'][3]}")
+    print(f"  - Câmera aberta: {obs['estados'][4]}")
+    print(f"  - Câmera ativa: {obs['estados'][5]:.2f}")
+    print(f"  - Energia: {obs['estados'][6]*100:.1f}%")
     input("O jogo iniciou a noite 1? (aperta Enter para confirmar)")
     env.close()
 
 def modo_treino():
     from src.agent.train import treinar
-    import os, glob
+    import os, glob, re
 
-    # Prioriza o modelo merged se existir
-    if os.path.exists("pc1_fnaf_ppo_220359_steps.zip"):
-        ultimo_modelo = "pc1_fnaf_ppo_220359_steps.zip"
-        print("Usando modelo merged")
+    merged = glob.glob("modelos/*merged*.zip")
+    if merged:
+        ultimo_modelo = max(merged, key=os.path.getctime)
+        print(f"Usando modelo merged: {ultimo_modelo}")
     else:
-        modelos = glob.glob("modelos/*.zip")
-        ultimo_modelo = max(modelos, key=os.path.getctime) if modelos else None
+        def extrair_steps(path):
+            m = re.search(r"_(\d+)_steps\.zip$", path)
+            return int(m.group(1)) if m else -1
 
-    if ultimo_modelo:
-        print(f"Continuando treino: {ultimo_modelo}")
-    else:
-        print("Nenhum modelo encontrado — começando do zero")
+        numerados = [p for p in glob.glob("modelos/*.zip") if extrair_steps(p) >= 0]
+        if numerados:
+            ultimo_modelo = max(numerados, key=extrair_steps)
+            print(f"Continuando treino: {ultimo_modelo} ({extrair_steps(ultimo_modelo):,} steps)")
+        else:
+            outros = glob.glob("modelos/*.zip")
+            ultimo_modelo = max(outros, key=os.path.getctime) if outros else None
+            if ultimo_modelo:
+                print(f"Continuando treino (sem steps no nome): {ultimo_modelo}")
+            else:
+                print("Nenhum modelo encontrado — começando do zero")
 
     treinar(timesteps=500_000, carregar_modelo=ultimo_modelo)
 

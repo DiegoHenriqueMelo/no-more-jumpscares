@@ -1,9 +1,11 @@
 import os
+import sys
 import time
 import keyboard
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
 from src.environment.fnaf_env import FNAFEnv
+from src.agent.multimodal_policy import MultimodalExtractor
 
 PASTA_MODELOS = "modelos"
 PASTA_LOGS    = "logs"
@@ -33,20 +35,27 @@ def _env_str_obrigatorio(nome: str) -> str:
 
 
 class LogCallback(BaseCallback):
-    def __init__(self):
+    def __init__(self, log_steps: bool = False):
         super().__init__()
-        self.episodio         = 0
+        self.episodio          = 0
         self.episodios_validos = 0
-        self.mortes           = 0
-        self.vitorias         = 0
+        self.mortes            = 0
+        self.vitorias          = 0
         self.interrompidos     = 0
-        self.recompensa_total = 0.0
-        self.inicio_ep        = None
+        self.recompensa_total  = 0.0
         self._pausa_disponivel = True
+        self._log_steps        = log_steps
 
         os.makedirs("logs", exist_ok=True)
+        cabecalho = f"\n{'='*60}\nTreino iniciado\n{'='*60}\n"
+
         self.arquivo_log = open("logs/treino.log", "a", encoding="utf-8")
-        self.arquivo_log.write(f"\n{'='*60}\nTreino iniciado\n{'='*60}\n")
+        self.arquivo_log.write(cabecalho)
+
+        self.arquivo_log_steps = None
+        if log_steps:
+            self.arquivo_log_steps = open("logs/treino_steps.log", "a", encoding="utf-8")
+            self.arquivo_log_steps.write(cabecalho)
 
     def _on_step(self) -> bool:
         # F12 pausa a IA — segura para pausar, larga para continuar
@@ -62,21 +71,38 @@ class LogCallback(BaseCallback):
                 )
                 self._pausa_disponivel = False
 
-        if self.inicio_ep is None:
-            # Marca o inicio real do episodio para calcular duracao em minutos.
-            self.inicio_ep = time.perf_counter()
-
         info = self.locals.get("infos", [{}])[0]
         self.recompensa_total += self.locals.get("rewards", [0])[0]
 
+        energia = info.get("energia")
+        if energia is not None:
+            pe    = int(info.get("porta_esq",     False))
+            pd    = int(info.get("porta_dir",     False))
+            le    = int(info.get("luz_esq",       False))
+            ld    = int(info.get("luz_dir",       False))
+            ca    = int(info.get("camera_aberta", False))
+            cv    = int(info.get("camera_ativa",  0))
+            acao  = info.get("acao_nome", "?")
+            valida = "OK" if info.get("acao_valida", True) else "X "
+            linha_step = (
+                f"{_env_str_obrigatorio('PC')} | "
+                f"Ep {self.episodio:4d} | "
+                f"E:{energia:5.1f}% | "
+                f"PE:{pe} PD:{pd} LE:{le} LD:{ld} | "
+                f"CAM:{ca}/{cv:2d} | "
+                f"#{info.get('passos', 0):5d} | "
+                f"{acao:<20} [{valida}]"
+            )
+            if self._log_steps:
+                print(linha_step)
+            if self.arquivo_log_steps:
+                self.arquivo_log_steps.write(linha_step + "\n")
+                self.arquivo_log_steps.flush()
+
         done = self.locals.get("dones", [False])[0]
         if done:
-            agora = time.perf_counter()
-            tempo_ep_minutos = (
-                (agora - self.inicio_ep) / 60.0
-                if self.inicio_ep is not None
-                else 0.0
-            )
+            # tempo_real vem do ambiente — medido antes do reset do próximo episódio
+            tempo_ep_minutos = info.get("tempo_real", 0.0) / 60.0
 
             self.episodio += 1
             interrompido = info.get("interrompido", False)
@@ -124,16 +150,18 @@ class LogCallback(BaseCallback):
 
             self.arquivo_log.flush()
             self.recompensa_total = 0.0
-            self.inicio_ep = None
 
         return True
 
     def _on_training_end(self):
         self.arquivo_log.write("Treino finalizado\n")
         self.arquivo_log.close()
+        if self.arquivo_log_steps:
+            self.arquivo_log_steps.write("Treino finalizado\n")
+            self.arquivo_log_steps.close()
 
 
-def treinar(timesteps: int = 500_000, carregar_modelo: str = None):
+def treinar(timesteps: int = 500_000, carregar_modelo: str = None, log_steps: bool = False):
     print("Iniciando ambiente FNAF1...")
     print("ATENÇÃO: Deixe o jogo aberto e na tela inicial!")
     print("Dica: segure F12 a qualquer momento para pausar.\n")
@@ -146,15 +174,20 @@ def treinar(timesteps: int = 500_000, carregar_modelo: str = None):
         modelo = PPO.load(carregar_modelo, env=env)
     else:
         print("Criando novo modelo PPO...")
+        policy_kwargs = dict(
+            features_extractor_class=MultimodalExtractor,
+        )
         modelo = PPO(
-            policy="CnnPolicy",
+            policy="MultiInputPolicy",
             env=env,
+            policy_kwargs=policy_kwargs,
             learning_rate=3e-4,
             n_steps=2048,
             ent_coef=0.01,
             batch_size=64,
             n_epochs=10,
-            gamma=0.99,
+            gamma=0.995,
+            ent_coef=0.01,
             verbose=0,
             tensorboard_log=PASTA_LOGS,
             device="auto",
@@ -165,7 +198,7 @@ def treinar(timesteps: int = 500_000, carregar_modelo: str = None):
         save_path=PASTA_MODELOS,
         name_prefix=f"{_env_str_obrigatorio('PC')}_fnaf_ppo",
     )
-    log_callback = LogCallback()
+    log_callback = LogCallback(log_steps=log_steps)
 
     print(f"Treinando por {timesteps:,} timesteps...\n")
     try:
@@ -180,6 +213,9 @@ def treinar(timesteps: int = 500_000, carregar_modelo: str = None):
         if not log_callback.arquivo_log.closed:
             log_callback.arquivo_log.write("Treino finalizado\n")
             log_callback.arquivo_log.close()
+        if log_callback.arquivo_log_steps and not log_callback.arquivo_log_steps.closed:
+            log_callback.arquivo_log_steps.write("Treino finalizado\n")
+            log_callback.arquivo_log_steps.close()
 
         caminho_final = f"{PASTA_MODELOS}/fnaf_ppo_final"
         modelo.save(caminho_final)
@@ -192,4 +228,5 @@ if __name__ == "__main__":
     treinar(
         timesteps=500_000,
         carregar_modelo=None,
+        log_steps="--steps" in sys.argv,
     )
