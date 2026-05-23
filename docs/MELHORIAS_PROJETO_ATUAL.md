@@ -4,6 +4,16 @@ Melhorias que podem ser aplicadas sem trocar o algoritmo base (PPO) nem a
 arquitetura fundamental do projeto. Cada seção descreve o problema que a melhoria
 resolve, como funciona e o que precisaria mudar no código.
 
+**Status das implementações:**
+
+| Melhoria | Status |
+|----------|--------|
+| RecurrentPPO — Memória Temporal com LSTM | ✅ Implementado (`src/agent/train_recurrent.py`) |
+| Paralelização com VecEnv | ✅ Implementado (suporte via `make_env_fn` + `SubprocVecEnv`) |
+| Behavioral Cloning como Warmup | ✅ Implementado (`src/agent/behavioral_cloning.py` + `gravar_gameplay.py`) |
+| Curriculum Learning | 🔲 Pendente |
+| Simplificação do Espaço de Ações | 🔲 Pendente |
+
 ---
 
 ## Curriculum Learning
@@ -68,7 +78,7 @@ class CurriculumCallback(BaseCallback):
 
 ---
 
-## RecurrentPPO — Memória Temporal com LSTM
+## ✅ RecurrentPPO — Memória Temporal com LSTM (implementado)
 
 ### O problema
 
@@ -98,39 +108,30 @@ Observação (frame + estado) → Extrator de features (CNN + MLP)
 O estado oculto é zerado no início de cada episódio e propagado entre steps. O
 agente efetivamente tem acesso a um "resumo comprimido" de tudo que viu no episódio.
 
-### O que mudar no código
+### Como usar
 
-**`requirements.txt`:**
+```bash
+# Novo treino:
+python -m src.agent.train_recurrent --timesteps 500000
 
-```
-sb3-contrib>=2.8.0
-```
+# Continuar de um checkpoint:
+python -m src.agent.train_recurrent --modelo modelos/fnaf_recurrent_ppo_final.zip
 
-**`src/agent/train.py`:**
-
-```python
-from sb3_contrib import RecurrentPPO
-
-model = RecurrentPPO(
-    "MultiInputLstmPolicy",
-    env,
-    lstm_hidden_size=256,
-    n_lstm_layers=1,
-    ...  # demais hiperparâmetros permanecem iguais
-)
+# Aproveitar pesos de um PPO/BC antigo:
+python -m src.agent.train_recurrent --ppo-antigo modelos/fnaf_bc.zip
 ```
 
-A política `MultiInputLstmPolicy` é o equivalente recorrente da `MultiInputPolicy`
-atual — compatível com o espaço de observação `Dict` que já existe.
+Veja `docs/COMO_USAR.md` para instruções completas.
 
-**Atenção:** o `RecurrentPPO` exige que os episódios não sejam quebrados no meio do
-buffer de experiências. O parâmetro `n_steps` precisa ser múltiplo do tamanho médio
-de episódio ou usar `episode_start` masks corretamente. O `sb3-contrib` lida com
-isso automaticamente, mas vale verificar os logs de treinamento.
+**Arquitetura implementada:**
+- `MultiInputLstmPolicy` com `lstm_hidden_size=256`, `n_lstm_layers=1`, `shared_lstm=True`
+- `ent_coef=0.02` (aumentado de 0.01 para combater entropia colapsada)
+- `gamma=0.995`, `n_steps=2048`, `batch_size=64`, `n_epochs=10`
+- Transferência de pesos via `--ppo-antigo` (CNN + MLP; LSTM começa do zero)
 
 ---
 
-## Behavioral Cloning como Warmup
+## ✅ Behavioral Cloning como Warmup (implementado)
 
 ### O problema
 
@@ -159,9 +160,25 @@ O resultado esperado é que o primeiro win passe de ~200k steps para menos de 20
 porque o agente já sabe as mecânicas básicas e o PPO só precisa otimizar a
 estratégia, não descobrir o que cada ação faz.
 
-O módulo `src/agent/behavioral_cloning.py` já existe no projeto. O gargalo é
-**gravar o dataset de gameplay humano**. O formato JSON esperado pelo módulo está
-definido no próprio arquivo.
+O módulo `src/agent/behavioral_cloning.py` está implementado. O gargalo é
+**gravar o dataset de gameplay humano** com `src/utils/gravar_gameplay.py`.
+
+**Fluxo completo:**
+
+```bash
+# 1. Gravar gameplay:
+python -m src.utils.gravar_gameplay
+
+# 2. Treinar BC:
+python -m src.agent.behavioral_cloning --dados dados/gameplay_*/dataset.json
+
+# 3. Iniciar RecurrentPPO com pesos do BC:
+python -m src.agent.train_recurrent --ppo-antigo modelos/fnaf_bc.zip
+```
+
+O `gravar_gameplay.py` registra todos os 8 estados automaticamente (incluindo
+energia estimada e tempo de episódio). Datasets antigos (7 estados) são
+retrocompatíveis — a 8ª dimensão é completada com zeros.
 
 ### DAgger — BC iterativo (extensão)
 
@@ -222,7 +239,7 @@ um limitante. Vale experimentar e comparar métricas.
 
 ---
 
-## Paralelização com VecEnv
+## ✅ Paralelização com VecEnv (implementado)
 
 ### O problema
 
@@ -249,5 +266,17 @@ clicar.
 - Tela com resolução suficiente para 4 janelas lado a lado (ou múltiplos monitores)
 - GPU não é gargalo aqui; o gargalo é a captura de tela e interação
 
-É a melhoria de throughput mais direta, mas a mais trabalhosa de implementar por
-exigir refatoração do gerenciamento de janelas.
+**Como usar:**
+
+```bash
+# 2 ambientes paralelos:
+python -m src.agent.train_recurrent --n-envs 2
+```
+
+O suporte está implementado via `make_env_fn(window_title_override, coord_offset)`.
+Cada instância do `FNAFEnv` aceita um título de janela e offset de coordenadas
+independentes, permitindo controlar múltiplas janelas do FNAF ao mesmo tempo.
+
+**Pré-requisito:** cada janela do jogo deve ter um título diferente (configurável
+pelo lançador do FNAF ou pelo `.env`). Com `--n-envs 1` (padrão), funciona com
+uma única janela normalmente.

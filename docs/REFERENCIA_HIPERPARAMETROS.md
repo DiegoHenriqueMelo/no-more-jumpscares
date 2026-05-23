@@ -8,7 +8,7 @@ o que os logs estão mostrando e prever o efeito de qualquer ajuste.
 
 ## Coeficiente de entropia (`ent_coef`)
 
-**Valor atual:** `0.01`
+**Valor atual:** `0.02` (RecurrentPPO) / `0.01` (PPO padrão legado)
 
 ### O que é
 
@@ -52,8 +52,12 @@ ou descansar para conservar energia.
 
 ### Como ajustar
 
-O valor 0.01 é um ponto de partida razoável para este ambiente. As situações em
-que faz sentido mexer:
+O valor 0.02 (RecurrentPPO) foi escolhido para combater a entropia colapsada
+observada no plateau de −50 pontos após ~1000 episódios de PPO padrão. O LSTM
+precisa de mais exploração no início do treino para aprender quais padrões
+temporais são informativos.
+
+As situações em que faz sentido mexer:
 
 **Aumentar para 0.02–0.05** se:
 - Após 200k steps, o agente ainda repete a mesma sequência de ações
@@ -285,12 +289,58 @@ atingir 200k timesteps sem vitórias com a configuração atual.
 
 ### Observação multimodal (Dict space)
 
-O SB3 com `MultiInputPolicy` processa espaços de observação `Dict` passando cada
-chave por seu próprio extrator. Neste projeto, a chave `"imagem"` passa pela CNN e
-`"estados"` passa pelo MLP. A concatenação dos dois é o que o ator e o crítico
-recebem como entrada.
+O SB3 com `MultiInputPolicy` / `MultiInputLstmPolicy` processa espaços de observação
+`Dict` passando cada chave por seu próprio extrator. Neste projeto, a chave `"imagem"`
+passa pela CNN e `"estados"` passa pelo MLP. A concatenação dos dois é o que o LSTM
+(no RecurrentPPO) ou o ator/crítico (no PPO) recebem como entrada.
 
 Isso é relevante porque **mudanças na dimensão de qualquer campo invalidam o modelo
 salvo**. Se o número de estados mudar de 8 para 9, o `Linear(8, 32)` do MLP não
 carrega os pesos antigos. Qualquer modificação no `observation_space` exige reinício
 do treinamento do zero.
+
+---
+
+## Hiperparâmetros específicos do RecurrentPPO
+
+### LSTM hidden size (`lstm_hidden_size`)
+
+**Valor atual:** `256`
+
+Tamanho do estado oculto do LSTM. Deve ser igual ao `features_dim` do extrator
+(256 neste projeto) para que a camada linear que conecta o extrator ao LSTM não
+precise de projeção adicional.
+
+Aumentar para 512 pode melhorar a capacidade de memorização, mas aumenta o número
+de parâmetros e o tempo de treino. Para este ambiente (17 ações, 8 estados), 256
+é suficiente.
+
+### Camadas LSTM (`n_lstm_layers`)
+
+**Valor atual:** `1`
+
+Um único LSTM é suficiente para capturar as dependências temporais relevantes no
+FNAF (rastrear posição de animatrônicos, lembrar se a porta foi aberta há 3 steps).
+Aumentar para 2 pode melhorar a capacidade mas raramente justifica o custo
+computacional para ambientes simples.
+
+### LSTM compartilhado (`shared_lstm`)
+
+**Valor atual:** `True`
+
+Com `shared_lstm=True`, ator e crítico usam o mesmo LSTM. Isso reduz parâmetros
+e é suficiente para a maioria dos casos. Com `shared_lstm=False`, ator e crítico
+têm LSTMs independentes — pode ser útil se o crítico precisar de informação temporal
+diferente do ator, mas raramente necessário.
+
+### Horizonte efetivo com LSTM
+
+O LSTM comprime informações de toda a trajetória num vetor fixo `(h, c)`. Na prática,
+isso "estende" o horizonte efetivo do agente além do que o `gamma` implica:
+
+- PPO com gamma=0.995: horizonte de ~200 steps
+- RecurrentPPO com LSTM: o agente tem acesso implícito a toda a trajetória via `(h, c)`
+
+Isso é fundamental para o FNAF: a posição dos animatrônicos nos steps anteriores
+está implicitamente codificada no estado LSTM, mesmo que `gamma` limite o horizonte
+das recompensas futuras.

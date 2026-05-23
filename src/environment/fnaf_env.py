@@ -5,6 +5,7 @@ import time
 import os
 import subprocess
 import unicodedata
+import pygetwindow as gw
 from pathlib import Path
 from gymnasium import spaces
 from src.utils.capture import GameCapture
@@ -149,8 +150,31 @@ CHECKPOINTS_NOITE = [
 class FNAFEnv(gym.Env):
     metadata = {"render_modes": ["human"]}
 
-    def __init__(self, render_mode=None):
+    def __init__(self, render_mode=None, window_title_override=None, coord_offset=(0, 0)):
+        """
+        Args:
+            render_mode: modo de renderização (passado para gym.Env)
+            window_title_override: título alternativo da janela do jogo.
+                Usado para VecEnv com múltiplas instâncias — cada instância
+                pode ter um título diferente (ex: "FNAF - Janela 1").
+                Se None, usa FNAF_WINDOW_TITLE do .env.
+            coord_offset: tupla (offset_x, offset_y) somada a todas as
+                coordenadas de clique/arrasto. Útil para múltiplas janelas
+                posicionadas em telas diferentes ou em grid.
+                Exemplo: (1280, 0) desloca todas as coords 1280px à direita.
+        """
         super().__init__()
+
+        # ── Configuração por instância para suporte a VecEnv ─────────────
+        self._window_title = window_title_override or WINDOW_TITLE
+        ox, oy = coord_offset
+        if ox == 0 and oy == 0:
+            self._coords = dict(COORDS)
+            self._reset_click = RESET_CLICK
+        else:
+            self._coords = {k: (x + ox, y + oy) for k, (x, y) in COORDS.items()}
+            self._reset_click = (RESET_CLICK[0] + ox, RESET_CLICK[1] + oy)
+        # ─────────────────────────────────────────────────────────────────
 
         self.capture          = GameCapture()
         self.render_mode      = render_mode
@@ -165,7 +189,9 @@ class FNAFEnv(gym.Env):
             ),
             "estados": spaces.Box(
                 low=0, high=1,
-                shape=(8,),
+                # 9 estados: porta_esq, porta_dir, luz_esq, luz_dir, camera_aberta,
+                # camera_ativa/11, energia/100, tempo_ep/535, cooldown_camera>0
+                shape=(9,),
                 dtype=np.float32
             )
         })
@@ -202,8 +228,7 @@ class FNAFEnv(gym.Env):
         self._total_bonus_hora: float = 0.0
 
     def _janela_do_jogo_aberta(self) -> bool:
-        import pygetwindow as gw
-        return bool(gw.getWindowsWithTitle(WINDOW_TITLE))
+        return bool(gw.getWindowsWithTitle(self._window_title))
 
     def _camera_aberta_por_template(self) -> bool | None:
         """Verifica estado real da câmera via matchTemplate no indicador 'YOU' do mapa.
@@ -223,7 +248,7 @@ class FNAFEnv(gym.Env):
         if self._pixel_antes_porta is None:
             return True
         b1, g1, r1 = self._pixel_antes_porta
-        x, y = COORDS[nome_acao]
+        x, y = self._coords[nome_acao]
 
         for tentativa in range(3):
             frame = self.capture.capturar_tela()
@@ -265,8 +290,7 @@ class FNAFEnv(gym.Env):
         return False
 
     def _verificar_e_focar_janela(self) -> bool:
-        import pygetwindow as gw
-        janelas = gw.getWindowsWithTitle(WINDOW_TITLE)
+        janelas = gw.getWindowsWithTitle(self._window_title)
         if not janelas:
             return False
         win = janelas[0]
@@ -379,13 +403,13 @@ class FNAFEnv(gym.Env):
         print("[FALLBACK] Jogo fechado detectado. Relancando executavel...")
         time.sleep(REABRIR_ESPERA_SEGUNDOS)
 
-        if not self.capture.focar_janela(WINDOW_TITLE):
+        if not self.capture.focar_janela(self._window_title):
             print("[FALLBACK] Janela nao encontrada apos relancamento.")
             return False
 
         self.capture.atalho("alt", "enter")
         time.sleep(POS_ALT_ENTER_ESPERA_SEGUNDOS)
-        self.capture.focar_janela(WINDOW_TITLE)
+        self.capture.focar_janela(self._window_title)
         print("[FALLBACK] Jogo recolocado em modo janela (ALT+ENTER).")
         return True
 
@@ -416,14 +440,14 @@ class FNAFEnv(gym.Env):
 
         observacao = {
             "imagem": np.zeros((ALTURA, LARGURA, 1), dtype=np.uint8),
-            "estados": np.zeros(7, dtype=np.float32)
+            "estados": np.zeros(9, dtype=np.float32)
         }
         return observacao, 0.0, True, False, info
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
 
-        if not WINDOW_TITLE:
+        if not self._window_title:
             raise RuntimeError(
                 "FNAF_WINDOW_TITLE nao configurado no .env. "
                 "Configure as variaveis obrigatorias antes de executar."
@@ -462,16 +486,16 @@ class FNAFEnv(gym.Env):
         if not self._janela_do_jogo_aberta():
             self._abrir_jogo_fallback()
 
-        if not self.capture.focar_janela(WINDOW_TITLE):
+        if not self.capture.focar_janela(self._window_title):
             raise RuntimeError(
                 "Janela do jogo nao encontrada. "
                 "Configure FNAF_EXECUTABLE_PATH no .env para fallback automatico."
             )
         time.sleep(0.5)
 
-        self.capture.clicar(*RESET_CLICK)
+        self.capture.clicar(*self._reset_click)
         time.sleep(15)
-        self.capture.clicar(*RESET_CLICK)
+        self.capture.clicar(*self._reset_click)
         time.sleep(20)
         self.episode_start_time = time.perf_counter()
 
@@ -535,11 +559,11 @@ class FNAFEnv(gym.Env):
         # Pressiona o botão de luz ativa antes de capturar a observação —
         # mantém o corredor iluminado na imagem e sincroniza passivamente a porta do mesmo lado.
         if self.luz_esq:
-            lx, ly = COORDS["luz_esquerda"]
+            lx, ly = self._coords["luz_esquerda"]
             self.capture.segurar_botao(lx, ly)
             self._botao_luz_pressionado = (lx, ly)
             _frame_l = self.capture.capturar_tela()
-            _px, _py = COORDS["porta_esquerda"]
+            _px, _py = self._coords["porta_esquerda"]
             _h, _w = _frame_l.shape[:2]
             if 0 <= _py < _h and 0 <= _px < _w:
                 _gl, _rl = int(_frame_l[_py, _px][1]), int(_frame_l[_py, _px][2])
@@ -548,11 +572,11 @@ class FNAFEnv(gym.Env):
                     self.porta_esq = _real
                     self._count_sync_porta += 1
         elif self.luz_dir:
-            lx, ly = COORDS["luz_direita"]
+            lx, ly = self._coords["luz_direita"]
             self.capture.segurar_botao(lx, ly)
             self._botao_luz_pressionado = (lx, ly)
             _frame_l = self.capture.capturar_tela()
-            _px, _py = COORDS["porta_direita"]
+            _px, _py = self._coords["porta_direita"]
             _h, _w = _frame_l.shape[:2]
             if 0 <= _py < _h and 0 <= _px < _w:
                 _gl, _rl = int(_frame_l[_py, _px][1]), int(_frame_l[_py, _px][2])
@@ -628,7 +652,7 @@ class FNAFEnv(gym.Env):
 
             if nome_acao in {"porta_esquerda", "porta_direita"}:
                 # Lê cor do botão antes do toggle para corrigir desync de estado.
-                x_pre, y_pre = COORDS[nome_acao]
+                x_pre, y_pre = self._coords[nome_acao]
                 frame_pre = self.capture.capturar_tela()
                 h_pre, w_pre = frame_pre.shape[:2]
                 if 0 <= y_pre < h_pre and 0 <= x_pre < w_pre:
@@ -691,8 +715,8 @@ class FNAFEnv(gym.Env):
                 return False  # Ação inválida - câmera fechada
             self.camera_ativa = acao - 5
 
-        if nome_acao in COORDS:
-            x, y = COORDS[nome_acao]
+        if nome_acao in self._coords:
+            x, y = self._coords[nome_acao]
 
             _saindo_camera = (self.ultima_acao in ACOES_CAMERA or
                               self.ultima_acao == "abrir_fechar_camera" or
@@ -832,6 +856,11 @@ class FNAFEnv(gym.Env):
         if self.porta_esq and self.porta_dir:
             recompensa -= 1.0
 
+        # Bônus por abrir câmera após inatividade — incentiva vigilância ativa
+        # O cooldown garante que só conta quando a câmera realmente acabou de abrir.
+        if nome_acao == "abrir_fechar_camera" and self.camera_aberta and self.passos_sem_camera > 10:
+            recompensa += 0.3
+
         # Penalidade por inatividade da câmera — Foxy corre a cada ~5s sem câmera
         if self.passos_sem_camera > 20:
             excesso = self.passos_sem_camera - 20
@@ -846,7 +875,21 @@ class FNAFEnv(gym.Env):
         return recompensa
 
     def _capturar_observacao(self) -> dict:
-        frame = self.capture.capturar_tela()
+        # Captura só a janela do jogo (não o monitor inteiro) para suporte a
+        # multi-monitor e modo janela onde o jogo não ocupa toda a tela.
+        janelas = gw.getWindowsWithTitle(self._window_title)
+        if janelas:
+            win = janelas[0]
+            regiao = {
+                "left":   win.left,
+                "top":    win.top,
+                "width":  win.width,
+                "height": win.height,
+            }
+            frame = self.capture.capturar_tela(regiao)
+        else:
+            frame = self.capture.capturar_tela()
+
         frame = self.capture.redimensionar(frame, LARGURA, ALTURA)
         frame = self.capture.para_escala_cinza(frame)
         frame = np.expand_dims(frame, axis=-1)
@@ -860,6 +903,7 @@ class FNAFEnv(gym.Env):
             float(self.camera_ativa) / 11.0,
             float(self.energia) / 100.0,
             min((time.perf_counter() - (self.episode_start_time or time.perf_counter())) / 535.0, 1.0),
+            float(self.cooldown_camera > 0),   # 9º estado: câmera em cooldown?
         ], dtype=np.float32)
 
         return {"imagem": frame, "estados": estados}
@@ -915,8 +959,7 @@ class FNAFEnv(gym.Env):
 
     def _capturar_janela(self) -> np.ndarray:
         """Captura apenas a janela do jogo e redimensiona para a resolução de referência."""
-        import pygetwindow as gw
-        janelas = gw.getWindowsWithTitle(WINDOW_TITLE)
+        janelas = gw.getWindowsWithTitle(self._window_title)
         if not janelas:
             raise RuntimeError("janela do jogo nao encontrada")
 

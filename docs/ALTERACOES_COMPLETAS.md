@@ -455,8 +455,9 @@ comportamento dos animatrônicos.
 
 ---
 
-## Arquivos modificados
+## Arquivos modificados (histórico cumulativo)
 
+### Fase 1 — PPO padrão
 - `src/environment/fnaf_env.py` — todas as mudanças do ambiente
 - `src/agent/multimodal_policy.py` — extrator multimodal: CNN para imagem + MLP para 8 estados
 - `src/agent/train.py` — gamma=0.995, ent_coef=0.01, MultiInputPolicy, log de episódio
@@ -464,3 +465,157 @@ comportamento dos animatrônicos.
 - `src/utils/calibrar.py` — comando `camera_aberta` para gerar o template de referência
 - `src/utils/simular_energia.py` — utilitário para calibrar e verificar taxas de energia
 - `.env` / `.env.example` — variáveis de drag da câmera, coordenadas das ações, identificador de PC
+
+### Fase 2 — RecurrentPPO + BC + VecEnv
+- `src/agent/train_recurrent.py` *(novo)* — treino com RecurrentPPO (LSTM), VecEnv, transferência de pesos
+- `src/utils/dummy_env.py` *(novo)* — ambiente mínimo para carregar modelos sem abrir o jogo
+- `src/environment/fnaf_env.py` — suporte a `window_title_override` e `coord_offset` para VecEnv multi-janela; `import pygetwindow` movido para nível de módulo; `self._coords` agora é cópia segura de `COORDS`; observation_space 8→9 estados; captura por janela em `_capturar_observacao()`
+- `src/agent/behavioral_cloning.py` — suporte a 9 estados; usa `DummyFNAFEnv` em vez de `FNAFEnv`; adicionada `transferir_para_recurrent()`; imports organizados
+- `src/utils/gravar_gameplay.py` — grava todos os 9 estados com `EstadoJogo`; `EstadoJogo.tick()` controla energia e cooldown; usa `WINDOW_TITLE` do módulo `fnaf_env`
+- `src/utils/dummy_env.py` — NUM_ESTADOS=9; shape do observation_space atualizado
+- `src/utils/testar_deteccao.py` — usa `WINDOW_TITLE` de `fnaf_env`; captura por janela
+- `merge_modelos.py` — usa `DummyFNAFEnv` em vez de `FNAFEnv()` para carregar modelos
+- `requirements.txt` — adicionados `sb3-contrib==2.8.0` e `keyboard==0.13.5`
+- **Removidos** — `src/utils/testar_energia.py` (debug hardcoded), `src/version.py` (nunca importado), `debug_*.png` / `teste_captura.png` (artefatos de debug), `logs/PPO_1` a `logs/PPO_7` (tensorboard de treinos antigos)
+
+---
+
+## 9º estado: cooldown_camera
+
+O vetor de estados cresceu de 8 para 9 dimensões com a adição de `cooldown_camera > 0`.
+
+### Por que este estado é importante
+
+O agente recebia `-0.5` de penalidade toda vez que tentava `abrir_fechar_camera`
+durante o cooldown de animação (~1s / 4 steps). Sem visibilidade do cooldown, a
+política precisava aprender por tentativa e erro um padrão temporal ("não tente
+abrir a câmera nos próximos N steps"). Expor diretamente o bit de cooldown elimina
+esse ruído de ações inválidas e reduz a carga de aprendizado do LSTM.
+
+```
+Estados (9 dimensões):
+  0  porta_esq           bool → 0.0 / 1.0
+  1  porta_dir           bool → 0.0 / 1.0
+  2  luz_esq             bool → 0.0 / 1.0
+  3  luz_dir             bool → 0.0 / 1.0
+  4  camera_aberta       bool → 0.0 / 1.0
+  5  camera_ativa        int  → /11.0  (0=nenhuma, 1-11=câmeras)
+  6  energia             %    → /100.0
+  7  tempo_ep            s    → /535.0 (clamped 0-1)
+  8  cooldown_camera     bool → 0.0 / 1.0  ← novo
+```
+
+### Bônus por vigilância ativa (reward shaping)
+
+Adicionado `+0.3` quando o agente abre a câmera após >10 steps sem câmera.
+Reforça vigilância ativa sem criar incentivo artificial — combinado com a
+penalidade de inatividade já existente, cria um gradiente mais claro.
+
+### Captura por janela em `_capturar_observacao()`
+
+Corrigido para capturar apenas a janela do jogo em vez do monitor inteiro.
+Isso garante que a observação seja limpa em modo janela e multi-monitor.
+
+### Limitação de multi-env real
+
+`SubprocVecEnv` com n_envs>1 roda steps em paralelo, mas todos os processos
+compartilham o mesmo cursor do mouse do OS (`pyautogui`). Dois envs tentando
+clicar simultaneamente causam conflito de input. **Para FNAF, n_envs=1 é o
+padrão correto.** Paralelismo real é feito via múltiplos PCs + `merge_modelos.py`.
+
+---
+
+## RecurrentPPO — Memória Temporal com LSTM
+
+### O que foi adicionado
+
+O agente passou a usar `RecurrentPPO` (sb3-contrib) em vez de PPO padrão como
+algoritmo principal. A mudança resolve o plateau de −50 pontos / 4AM observado
+após ~1000 episódios de PPO.
+
+### Diagnóstico do plateau −50 / 4AM
+
+| Causa | Solução |
+|-------|---------|
+| Sem memória temporal — agente não rastreia posição dos animatrônicos | LSTM no RecurrentPPO |
+| Entropia colapsada após 1000 episódios | `ent_coef=0.02` (era 0.01) |
+| Horizonte efetivo ~200 steps vs. ~700 steps/episódio | LSTM comprime a trajetória |
+
+### Arquitetura do RecurrentPPO
+
+```
+Obs (84×84 frame + 8 estados)
+    → MultimodalExtractor (CNN 3 camadas → flatten + MLP 8→32 → Linear 256)
+    → LSTM (256 → 256, 1 camada, shared_lstm=True)
+    → Ator: distribuição sobre 17 ações
+    → Crítico: estimativa de V(estado)
+```
+
+O estado LSTM `(h, c)` persiste entre steps e é zerado no `reset()` via
+`episode_start` masks gerenciadas pelo sb3-contrib.
+
+### Hiperparâmetros RecurrentPPO
+
+```python
+RecurrentPPO(
+    "MultiInputLstmPolicy", env,
+    policy_kwargs=dict(
+        features_extractor_class=MultimodalExtractor,
+        lstm_hidden_size=256,
+        n_lstm_layers=1,
+        shared_lstm=True,
+        enable_critic_lstm=False,
+    ),
+    learning_rate=3e-4,
+    n_steps=2048,
+    batch_size=64,
+    n_epochs=10,
+    gamma=0.995,
+    ent_coef=0.02,
+)
+```
+
+### Suporte a VecEnv multi-janela
+
+O `FNAFEnv.__init__` aceita dois novos parâmetros:
+
+```python
+FNAFEnv(
+    window_title_override="FNAF - Janela 2",   # título da janela a controlar
+    coord_offset=(1280, 0),                     # offset de todos os cliques
+)
+```
+
+Cada instância do `FNAFEnv` aponta para uma janela diferente. O `RecurrentPPO`
+rastreia os estados LSTM de cada sub-ambiente internamente.
+
+### Transferência de pesos PPO → RecurrentPPO
+
+O extrator de features (CNN + MLP) é arquiteturalmente idêntico entre PPO e
+RecurrentPPO. Pesos podem ser copiados com:
+
+```python
+modelo_recurrent.policy.features_extractor.load_state_dict(
+    ppo_antigo.policy.features_extractor.state_dict()
+)
+```
+
+O LSTM começa do zero — esperado, pois é uma camada nova sem equivalente no PPO.
+
+---
+
+## Behavioral Cloning — atualização para 8 estados
+
+### O que mudou
+
+O vetor de estados cresceu de 7 para 8 dimensões com a adição de `tempo_ep / 535.0`.
+O `behavioral_cloning.py` foi atualizado para:
+
+- Ler todos os 8 campos do JSON
+- Aceitar datasets antigos (7 estados) retrocompatível, com a 8ª dimensão em zero
+- Usar `DummyFNAFEnv` para instanciar o PPO sem precisar do jogo rodando
+- Exportar `transferir_para_recurrent()` para copiar pesos BC → RecurrentPPO
+
+O `gravar_gameplay.py` foi atualizado para registrar todos os 8 estados via a classe
+`EstadoJogo`, que espelha a lógica de estado do `FNAFEnv` (incluindo modelo de energia
+e toggle de câmera).
