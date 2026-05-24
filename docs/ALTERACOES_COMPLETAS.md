@@ -466,10 +466,10 @@ comportamento dos animatrônicos.
 - `src/utils/simular_energia.py` — utilitário para calibrar e verificar taxas de energia
 - `.env` / `.env.example` — variáveis de drag da câmera, coordenadas das ações, identificador de PC
 
-### Fase 2 — RecurrentPPO + BC + VecEnv
-- `src/agent/train_recurrent.py` *(novo)* — treino com RecurrentPPO (LSTM), VecEnv, transferência de pesos
+### Fase 2 — RecurrentPPO + BC
+- `src/agent/train_recurrent.py` *(novo)* — treino com RecurrentPPO (LSTM), transferência de pesos
 - `src/utils/dummy_env.py` *(novo)* — ambiente mínimo para carregar modelos sem abrir o jogo
-- `src/environment/fnaf_env.py` — suporte a `window_title_override` e `coord_offset` para VecEnv multi-janela; `import pygetwindow` movido para nível de módulo; `self._coords` agora é cópia segura de `COORDS`; observation_space 8→9 estados; captura por janela em `_capturar_observacao()`
+- `src/environment/fnaf_env.py` — `import pygetwindow` movido para nível de módulo; `self._coords` agora é cópia segura de `COORDS`; observation_space 8→9 estados; captura por janela em `_capturar_observacao()`; removido `coord_offset` (inviável com cursor único do OS)
 - `src/agent/behavioral_cloning.py` — suporte a 9 estados; usa `DummyFNAFEnv` em vez de `FNAFEnv`; adicionada `transferir_para_recurrent()`; imports organizados
 - `src/utils/gravar_gameplay.py` — grava todos os 9 estados com `EstadoJogo`; `EstadoJogo.tick()` controla energia e cooldown; usa `WINDOW_TITLE` do módulo `fnaf_env`
 - `src/utils/dummy_env.py` — NUM_ESTADOS=9; shape do observation_space atualizado
@@ -516,12 +516,16 @@ penalidade de inatividade já existente, cria um gradiente mais claro.
 Corrigido para capturar apenas a janela do jogo em vez do monitor inteiro.
 Isso garante que a observação seja limpa em modo janela e multi-monitor.
 
-### Limitação de multi-env real
+### Paralelismo real: múltiplos PCs
 
-`SubprocVecEnv` com n_envs>1 roda steps em paralelo, mas todos os processos
-compartilham o mesmo cursor do mouse do OS (`pyautogui`). Dois envs tentando
-clicar simultaneamente causam conflito de input. **Para FNAF, n_envs=1 é o
-padrão correto.** Paralelismo real é feito via múltiplos PCs + `merge_modelos.py`.
+O FNAF é controlado via `pyautogui`, que move o cursor físico único do OS.
+Múltiplas instâncias no mesmo PC causam conflito de input irrecuperável — não há
+solução viável sem substituir pyautogui por Win32 SendMessage (que Unity legado
+provavelmente ignora) ou usar sessões RDP isoladas (complexo, divide GPU).
+
+**Decisão:** removidos `coord_offset` e `SubprocVecEnv`. O paralelismo real é
+um agente por PC, todos gravando no mesmo MongoDB, modelos combinados via
+`merge_modelos.py`.
 
 ---
 
@@ -544,8 +548,8 @@ após ~1000 episódios de PPO.
 ### Arquitetura do RecurrentPPO
 
 ```
-Obs (84×84 frame + 8 estados)
-    → MultimodalExtractor (CNN 3 camadas → flatten + MLP 8→32 → Linear 256)
+Obs (84×84 frame + 9 estados)
+    → MultimodalExtractor (CNN 3 camadas → flatten + MLP 9→32 → Linear 256)
     → LSTM (256 → 256, 1 camada, shared_lstm=True)
     → Ator: distribuição sobre 17 ações
     → Crítico: estimativa de V(estado)
@@ -575,19 +579,15 @@ RecurrentPPO(
 )
 ```
 
-### Suporte a VecEnv multi-janela
+### Arquitetura do RecurrentPPO
 
-O `FNAFEnv.__init__` aceita dois novos parâmetros:
-
-```python
-FNAFEnv(
-    window_title_override="FNAF - Janela 2",   # título da janela a controlar
-    coord_offset=(1280, 0),                     # offset de todos os cliques
-)
 ```
-
-Cada instância do `FNAFEnv` aponta para uma janela diferente. O `RecurrentPPO`
-rastreia os estados LSTM de cada sub-ambiente internamente.
+Obs (84×84 frame + 9 estados)
+    → MultimodalExtractor (CNN 3 camadas → flatten + MLP 9→32 → Linear 256)
+    → LSTM (256 → 256, 1 camada, shared_lstm=True)
+    → Ator: distribuição sobre 17 ações
+    → Crítico: estimativa de V(estado)
+```
 
 ### Transferência de pesos PPO → RecurrentPPO
 

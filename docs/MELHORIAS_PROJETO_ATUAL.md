@@ -9,7 +9,7 @@ resolve, como funciona e o que precisaria mudar no código.
 | Melhoria | Status |
 |----------|--------|
 | RecurrentPPO — Memória Temporal com LSTM | ✅ Implementado (`src/agent/train_recurrent.py`) |
-| Paralelização com VecEnv | ✅ Implementado (suporte via `make_env_fn` + `SubprocVecEnv`) |
+| Paralelização entre PCs | ✅ Implementado (multi-PC + `merge_modelos.py`; mesma máquina inviável) |
 | Behavioral Cloning como Warmup | ✅ Implementado (`src/agent/behavioral_cloning.py` + `gravar_gameplay.py`) |
 | Curriculum Learning | 🔲 Pendente |
 | Simplificação do Espaço de Ações | 🔲 Pendente |
@@ -239,7 +239,7 @@ um limitante. Vale experimentar e comparar métricas.
 
 ---
 
-## ✅ Paralelização com VecEnv (implementado)
+## ✅ Paralelização entre PCs (implementado)
 
 ### O problema
 
@@ -247,36 +247,22 @@ O PPO coleta experiências de forma sequencial: um episódio por vez, em tempo r
 Com ~535s por episódio e overhead de captura/controle, um ciclo de 2048 steps leva
 ~25 minutos. São menos de 60 atualizações de política por hora.
 
-### Como funciona
+### Por que não é possível paralelizar no mesmo PC
 
-O SB3 suporta `SubprocVecEnv` — múltiplos ambientes rodando em processos paralelos
-que coletam dados simultaneamente. Com 4 instâncias paralelas:
+O FNAF é controlado via `pyautogui`, que move o **cursor físico único do OS**.
+Múltiplos processos tentando clicar simultaneamente em posições diferentes causam
+conflito de input — um processo sobrescreve o cursor do outro. Não há solução
+simples para isso em jogos que leem o mouse via polling direto (como Unity legado).
 
-```
-4 instâncias × 2048 steps / 4 = mesmo ciclo de update, 4× mais rápido
-```
+### Como funciona o paralelismo real
 
-Para FNAF, isso requer rodar 4 janelas do jogo simultaneamente. Cada instância
-precisa de coordenadas de janela independentes (sem sobreposição), e o
-`FNAFEnv` precisa receber um parâmetro identificando qual janela capturar e onde
-clicar.
-
-**Requisitos de hardware:**
-- ~500MB RAM por instância → ~2GB para 4 instâncias
-- Tela com resolução suficiente para 4 janelas lado a lado (ou múltiplos monitores)
-- GPU não é gargalo aqui; o gargalo é a captura de tela e interação
-
-**Como usar:**
+Cada PC roda um agente independente com seu próprio `.env` calibrado para aquela
+tela. Todos escrevem no mesmo MongoDB. Periodicamente os modelos são combinados:
 
 ```bash
-# 2 ambientes paralelos:
-python -m src.agent.train_recurrent --n-envs 2
+# Em qualquer PC, com os checkpoints copiados localmente:
+python merge_modelos.py modelos/pc1_final.zip modelos/pc2_final.zip --saida modelos/merged.zip
 ```
 
-O suporte está implementado via `make_env_fn(window_title_override, coord_offset)`.
-Cada instância do `FNAFEnv` aceita um título de janela e offset de coordenadas
-independentes, permitindo controlar múltiplas janelas do FNAF ao mesmo tempo.
-
-**Pré-requisito:** cada janela do jogo deve ter um título diferente (configurável
-pelo lançador do FNAF ou pelo `.env`). Com `--n-envs 1` (padrão), funciona com
-uma única janela normalmente.
+O modelo mesclado é redistribuído para todos os PCs como ponto de partida do
+próximo ciclo de treino.

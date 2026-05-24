@@ -18,21 +18,12 @@ Arquitetura:
             → Ator: distribuição sobre 17 ações
             → Crítico: estimativa de V(estado)
 
-VecEnv (múltiplas janelas)
+Paralelismo entre máquinas
 ---------------------------
-Para rodar N instâncias paralelas do FNAF, use a factory make_env_fn() e passe
-uma lista de configurações (window_title_override + coord_offset por janela).
-O RecurrentPPO suporta VecEnv nativamente — os estados LSTM são rastreados por
-sub-ambiente internamente pelo sb3-contrib.
-
-    envs = SubprocVecEnv([
-        make_env_fn("FNAF Janela 1", coord_offset=(0, 0)),
-        make_env_fn("FNAF Janela 2", coord_offset=(1280, 0)),
-    ])
-
-Requer: múltiplas janelas do jogo abertas simultaneamente, cada uma com título
-distinto configurado no .env (FNAF_WINDOW_TITLE_1, FNAF_WINDOW_TITLE_2, etc.)
-e coordenadas ajustadas via coord_offset.
+O FNAF usa pyautogui para clicar — compartilha o cursor do OS. Isso impede
+múltiplas instâncias do jogo no mesmo PC (dois processos brigariam pelo cursor).
+O paralelismo real é rodar um agente por PC, todos gravando no mesmo MongoDB,
+e combinar os modelos periodicamente com merge_modelos.py.
 
 Transferência de pesos do PPO antigo
 --------------------------------------
@@ -48,7 +39,7 @@ import keyboard
 from sb3_contrib import RecurrentPPO
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv
 
 from src.environment.fnaf_env import FNAFEnv
 from src.agent.multimodal_policy import MultimodalExtractor
@@ -58,37 +49,19 @@ PASTA_MODELOS = "modelos"
 PASTA_LOGS    = "logs"
 
 
-def make_env_fn(window_title_override: str = None, coord_offset: tuple = (0, 0)):
-    """Retorna uma função que cria um FNAFEnv com configuração específica de janela.
+def make_env_fn():
+    """Retorna uma função (thunk) que cria um FNAFEnv.
 
-    Projetado para uso com DummyVecEnv ou SubprocVecEnv:
-
-        envs = SubprocVecEnv([
-            make_env_fn("FNAF - Janela 1", coord_offset=(0, 0)),
-            make_env_fn("FNAF - Janela 2", coord_offset=(1280, 0)),
-        ])
-
-    Args:
-        window_title_override: título da janela do jogo a controlar. Se None,
-            usa FNAF_WINDOW_TITLE do .env.
-        coord_offset: (dx, dy) somado a todas as coordenadas de clique. Use
-            para múltiplas janelas posicionadas em grid na tela.
+    Usado com DummyVecEnv, que exige uma lista de callables:
+        env = DummyVecEnv([make_env_fn()])
     """
     def _init():
-        return FNAFEnv(
-            window_title_override=window_title_override,
-            coord_offset=coord_offset,
-        )
+        return FNAFEnv()
     return _init
 
 
 class LogCallback(BaseCallback):
-    """Loga progresso do treinamento step a step e por episódio.
-
-    Diferenças em relação ao train.py original:
-    - Suporta VecEnv com n_envs > 1 (itera sobre todos os ambientes no done).
-    - Mantém recompensa acumulada por sub-ambiente para log correto no VecEnv.
-    """
+    """Loga progresso do treinamento step a step e por episódio."""
 
     def __init__(self, log_steps: bool = False):
         super().__init__()
@@ -97,11 +70,10 @@ class LogCallback(BaseCallback):
         self.mortes            = 0
         self.vitorias          = 0
         self.interrompidos     = 0
-        self._recompensas      = {}  # env_idx → recompensa acumulada no episódio
+        self._recompensa_ep    = 0.0
         self._pausa_disponivel = True
         self._log_steps        = log_steps
         self._pc               = os.getenv("PC", "")
-        self.n_envs            = 1  # atualizado em _on_training_start
 
         os.makedirs("logs", exist_ok=True)
         cabecalho = f"\n{'='*60}\nTreino RecurrentPPO (LSTM) iniciado\n{'='*60}\n"
@@ -114,10 +86,6 @@ class LogCallback(BaseCallback):
             self.arquivo_log_steps = open("logs/treino_recurrent_steps.log", "a", encoding="utf-8")
             self.arquivo_log_steps.write(cabecalho)
 
-    def _on_training_start(self):
-        # Captura n_envs do modelo para label correto no log de episódio
-        self.n_envs = self.training_env.num_envs
-
     def _on_step(self) -> bool:
         # F12 pausa a IA — segura para pausar, larga para continuar
         if self._pausa_disponivel:
@@ -129,87 +97,85 @@ class LogCallback(BaseCallback):
                 print(f"Aviso: pausa por F12 desativada. Motivo: {erro}")
                 self._pausa_disponivel = False
 
-        infos   = self.locals.get("infos", [{}])
+        infos   = self.locals.get("infos",   [{}])
         rewards = self.locals.get("rewards", [0.0])
-        dones   = self.locals.get("dones", [False])
+        dones   = self.locals.get("dones",   [False])
+        info, reward, done = infos[0], rewards[0], dones[0]
 
-        for env_idx, (info, reward, done) in enumerate(zip(infos, rewards, dones)):
-            # Acumula recompensa por ambiente
-            self._recompensas[env_idx] = self._recompensas.get(env_idx, 0.0) + reward
+        self._recompensa_ep += reward
 
-            energia = info.get("energia")
-            if energia is not None and self._log_steps:
-                pe    = int(info.get("porta_esq",     False))
-                pd    = int(info.get("porta_dir",     False))
-                le    = int(info.get("luz_esq",       False))
-                ld    = int(info.get("luz_dir",       False))
-                ca    = int(info.get("camera_aberta", False))
-                cv    = int(info.get("camera_ativa",  0))
-                acao  = info.get("acao_nome", "?")
-                valida = "OK" if info.get("acao_valida", True) else "X "
-                linha_step = (
+        energia = info.get("energia")
+        if energia is not None and self._log_steps:
+            pe    = int(info.get("porta_esq",     False))
+            pd    = int(info.get("porta_dir",     False))
+            le    = int(info.get("luz_esq",       False))
+            ld    = int(info.get("luz_dir",       False))
+            ca    = int(info.get("camera_aberta", False))
+            cv    = int(info.get("camera_ativa",  0))
+            acao  = info.get("acao_nome", "?")
+            valida = "OK" if info.get("acao_valida", True) else "X "
+            linha_step = (
+                f"{self._pc} | "
+                f"Ep {self.episodio:4d} | "
+                f"E:{energia:5.1f}% | "
+                f"PE:{pe} PD:{pd} LE:{le} LD:{ld} | "
+                f"CAM:{ca}/{cv:2d} | "
+                f"#{info.get('passos', 0):5d} | "
+                f"{acao:<20} [{valida}]"
+            )
+            print(linha_step)
+            if self.arquivo_log_steps:
+                self.arquivo_log_steps.write(linha_step + "\n")
+                self.arquivo_log_steps.flush()
+
+        if done:
+            tempo_ep_minutos = info.get("tempo_real", 0.0) / 60.0
+            recompensa_ep    = self._recompensa_ep
+            self._recompensa_ep = 0.0
+
+            self.episodio += 1
+            interrompido = info.get("interrompido", False)
+
+            if interrompido:
+                self.interrompidos += 1
+                resultado = "INTERROMPIDO"
+            elif info.get("morreu", False):
+                self.episodios_validos += 1
+                self.mortes += 1
+                resultado = "MORTE"
+            else:
+                self.episodios_validos += 1
+                self.vitorias += 1
+                resultado = "VITORIA"
+
+            taxa_vitoria = (
+                (self.vitorias / self.episodios_validos) * 100
+                if self.episodios_validos > 0 else 0.0
+            )
+
+            linha = (
+                f"{self._pc} | "
+                f"Ep {self.episodio:4d} | "
+                f"{resultado:8s} | "
+                f"Passos: {info.get('passos', 0):6d} | "
+                f"Tempo: {tempo_ep_minutos:7.2f} min | "
+                f"Recompensa: {recompensa_ep:8.1f} | "
+                f"Taxa vitória: {taxa_vitoria:.1f}%"
+            )
+
+            print(linha)
+            self.arquivo_log.write(linha + "\n")
+
+            ocorrido = info.get("ocorrido")
+            if interrompido and ocorrido:
+                linha_oc = (
                     f"{self._pc} | "
-                    f"Env {env_idx} | "
-                    f"Ep {self.episodio:4d} | "
-                    f"E:{energia:5.1f}% | "
-                    f"PE:{pe} PD:{pd} LE:{le} LD:{ld} | "
-                    f"CAM:{ca}/{cv:2d} | "
-                    f"#{info.get('passos', 0):5d} | "
-                    f"{acao:<20} [{valida}]"
+                    f"Ep {self.episodio:4d} | OCORRIDO | {ocorrido}"
                 )
-                print(linha_step)
-                if self.arquivo_log_steps:
-                    self.arquivo_log_steps.write(linha_step + "\n")
-                    self.arquivo_log_steps.flush()
+                print(linha_oc)
+                self.arquivo_log.write(linha_oc + "\n")
 
-            if done:
-                tempo_ep_minutos = info.get("tempo_real", 0.0) / 60.0
-                recompensa_ep    = self._recompensas.pop(env_idx, 0.0)
-
-                self.episodio += 1
-                interrompido = info.get("interrompido", False)
-
-                if interrompido:
-                    self.interrompidos += 1
-                    resultado = "INTERROMPIDO"
-                elif info.get("morreu", False):
-                    self.episodios_validos += 1
-                    self.mortes += 1
-                    resultado = "MORTE"
-                else:
-                    self.episodios_validos += 1
-                    self.vitorias += 1
-                    resultado = "VITORIA"
-
-                taxa_vitoria = (
-                    (self.vitorias / self.episodios_validos) * 100
-                    if self.episodios_validos > 0 else 0.0
-                )
-
-                env_label = f" Env{env_idx}" if self.n_envs > 1 else ""
-                linha = (
-                    f"{self._pc}{env_label} | "
-                    f"Ep {self.episodio:4d} | "
-                    f"{resultado:8s} | "
-                    f"Passos: {info.get('passos', 0):6d} | "
-                    f"Tempo: {tempo_ep_minutos:7.2f} min | "
-                    f"Recompensa: {recompensa_ep:8.1f} | "
-                    f"Taxa vitória: {taxa_vitoria:.1f}%"
-                )
-
-                print(linha)
-                self.arquivo_log.write(linha + "\n")
-
-                ocorrido = info.get("ocorrido")
-                if interrompido and ocorrido:
-                    linha_oc = (
-                        f"{self._pc} | "
-                        f"Ep {self.episodio:4d} | OCORRIDO | {ocorrido}"
-                    )
-                    print(linha_oc)
-                    self.arquivo_log.write(linha_oc + "\n")
-
-                self.arquivo_log.flush()
+            self.arquivo_log.flush()
 
         return True
 
@@ -225,8 +191,6 @@ def treinar(
     timesteps: int = 500_000,
     carregar_modelo: str = None,
     carregar_ppo_antigo: str = None,
-    n_envs: int = 1,
-    env_configs: list = None,
     log_steps: bool = False,
 ):
     """Treina com RecurrentPPO (LSTM).
@@ -238,12 +202,6 @@ def treinar(
             os pesos do extrator de features (CNN + MLP) são copiados para o novo
             RecurrentPPO. Útil para aproveitar o que o agente já aprendeu sobre
             a aparência do jogo sem precisar re-aprender do zero.
-        n_envs: número de ambientes paralelos. Para n_envs > 1, forneça env_configs.
-        env_configs: lista de dicts com kwargs para make_env_fn() por ambiente.
-            Exemplo: [
-                {"window_title_override": "FNAF 1", "coord_offset": (0, 0)},
-                {"window_title_override": "FNAF 2", "coord_offset": (1280, 0)},
-            ]
         log_steps: se True, imprime e salva o log de cada step.
     """
     os.makedirs(PASTA_MODELOS, exist_ok=True)
@@ -254,21 +212,8 @@ def treinar(
     print("Dica: segure F12 a qualquer momento para pausar.\n")
     time.sleep(3)
 
-    # ── Cria ambientes ────────────────────────────────────────────────────────
-    if n_envs == 1:
-        env = DummyVecEnv([make_env_fn()])
-        print("Modo: ambiente único (DummyVecEnv)")
-    else:
-        if env_configs and len(env_configs) == n_envs:
-            env_fns = [make_env_fn(**cfg) for cfg in env_configs]
-        else:
-            print(
-                f"Aviso: env_configs não fornecido ou tamanho incorreto para "
-                f"n_envs={n_envs}. Usando n_envs janelas sem override."
-            )
-            env_fns = [make_env_fn() for _ in range(n_envs)]
-        env = SubprocVecEnv(env_fns)
-        print(f"Modo: {n_envs} ambientes paralelos (SubprocVecEnv)")
+    # ── Cria ambiente ─────────────────────────────────────────────────────────
+    env = DummyVecEnv([make_env_fn()])
 
     # ── Cria ou carrega o modelo ──────────────────────────────────────────────
     if carregar_modelo and os.path.exists(carregar_modelo):
@@ -385,16 +330,11 @@ if __name__ == "__main__":
         "--steps", action="store_true",
         help="Ativa log detalhado por step (verbose — impacto no desempenho)",
     )
-    parser.add_argument(
-        "--n-envs", type=int, default=1, dest="n_envs",
-        help="Número de ambientes paralelos (padrão: 1). Requer múltiplas janelas do jogo.",
-    )
     args = parser.parse_args()
 
     treinar(
         timesteps=args.timesteps,
         carregar_modelo=args.modelo,
         carregar_ppo_antigo=args.ppo_antigo,
-        n_envs=args.n_envs,
         log_steps=args.steps,
     )

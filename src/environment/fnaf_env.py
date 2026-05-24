@@ -150,31 +150,19 @@ CHECKPOINTS_NOITE = [
 class FNAFEnv(gym.Env):
     metadata = {"render_modes": ["human"]}
 
-    def __init__(self, render_mode=None, window_title_override=None, coord_offset=(0, 0)):
+    def __init__(self, render_mode=None, window_title_override=None):
         """
         Args:
             render_mode: modo de renderização (passado para gym.Env)
-            window_title_override: título alternativo da janela do jogo.
-                Usado para VecEnv com múltiplas instâncias — cada instância
-                pode ter um título diferente (ex: "FNAF - Janela 1").
-                Se None, usa FNAF_WINDOW_TITLE do .env.
-            coord_offset: tupla (offset_x, offset_y) somada a todas as
-                coordenadas de clique/arrasto. Útil para múltiplas janelas
-                posicionadas em telas diferentes ou em grid.
-                Exemplo: (1280, 0) desloca todas as coords 1280px à direita.
+            window_title_override: sobrescreve o título da janela do jogo lido
+                do .env (FNAF_WINDOW_TITLE). Raramente necessário; útil para
+                testes sem alterar o .env.
         """
         super().__init__()
 
-        # ── Configuração por instância para suporte a VecEnv ─────────────
         self._window_title = window_title_override or WINDOW_TITLE
-        ox, oy = coord_offset
-        if ox == 0 and oy == 0:
-            self._coords = dict(COORDS)
-            self._reset_click = RESET_CLICK
-        else:
-            self._coords = {k: (x + ox, y + oy) for k, (x, y) in COORDS.items()}
-            self._reset_click = (RESET_CLICK[0] + ox, RESET_CLICK[1] + oy)
-        # ─────────────────────────────────────────────────────────────────
+        self._coords       = dict(COORDS)
+        self._reset_click  = RESET_CLICK
 
         self.capture          = GameCapture()
         self.render_mode      = render_mode

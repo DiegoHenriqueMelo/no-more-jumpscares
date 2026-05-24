@@ -98,17 +98,15 @@ python -m src.agent.train_recurrent --steps
 Imprime o estado completo a cada step: energia, portas, luzes, câmera, ação
 executada. Útil para diagnóstico, mas tem impacto no desempenho.
 
-#### Múltiplas janelas do jogo (VecEnv)
+#### Paralelismo entre máquinas
 
-Para N janelas abertas do FNAF simultaneamente:
+O FNAF é controlado via `pyautogui`, que move o cursor físico do OS. Por isso,
+**não é possível rodar múltiplas instâncias do jogo no mesmo PC** — dois processos
+brigariam pelo cursor e os cliques iriam para os lugares errados.
 
-```bash
-python -m src.agent.train_recurrent --n-envs 2
-```
-
-> **Atenção:** cada instância precisa de sua própria janela do jogo com título
-> diferente. Configure `window_title_override` e `coord_offset` no código se as
-> janelas estiverem em posições diferentes na tela.
+O paralelismo real é feito com múltiplos PCs, cada um rodando um agente
+independente. Os modelos são combinados periodicamente com `merge_modelos.py`.
+Veja [docs/MELHORIAS_PROJETO_ATUAL.md](MELHORIAS_PROJETO_ATUAL.md) para detalhes.
 
 #### Pausar durante o treino
 
