@@ -197,6 +197,7 @@ class FNAFEnv(gym.Env):
         self._count_sync_camera   = 0
         self._count_porta_falha   = 0
         self._count_sync_porta    = 0
+        self.passos_energia_zero  = 0
         self._log_desyncs_path    = "logs/desyncs.log"
         self._horas_bonificadas: set = set()
         self._total_bonus_hora: float = 0.0
@@ -416,7 +417,7 @@ class FNAFEnv(gym.Env):
 
         observacao = {
             "imagem": np.zeros((ALTURA, LARGURA, 1), dtype=np.uint8),
-            "estados": np.zeros(7, dtype=np.float32)
+            "estados": np.zeros(8, dtype=np.float32)
         }
         return observacao, 0.0, True, False, info
 
@@ -456,6 +457,7 @@ class FNAFEnv(gym.Env):
         self._count_sync_camera       = 0
         self._count_porta_falha       = 0
         self._count_sync_porta        = 0
+        self.passos_energia_zero      = 0
         self._horas_bonificadas       = set()
         self._total_bonus_hora        = 0.0
 
@@ -522,6 +524,7 @@ class FNAFEnv(gym.Env):
                 self.luz_esq = False
                 self.luz_dir = False
                 self.camera_aberta = False
+                self.passos_energia_zero += 1
 
         acao_valida = self._executar_acao(acao)
         time.sleep(STEP_DELAY)
@@ -567,6 +570,13 @@ class FNAFEnv(gym.Env):
             sobreviveu = self._detectar_vitoria()
         except Exception as erro:
             return self._interromper_episodio(f"falha ao capturar estado: {erro}")
+
+        # Failsafe: se energia zerou há mais de ~1.2 min e o template de morte
+        # ainda não detectou nada, força encerramento para evitar que o episódio
+        # rode horas numa tela de game over não reconhecida.
+        _LIMITE_ENERGIA_ZERO = max(60, int(72 / STEP_DELAY))
+        if not morreu and self.passos_energia_zero > _LIMITE_ENERGIA_ZERO:
+            morreu = True
 
         if self._botao_luz_pressionado:
             self.capture.soltar_botao(*self._botao_luz_pressionado)
@@ -933,10 +943,10 @@ class FNAFEnv(gym.Env):
         return cv2.resize(cinza, self._ref_size)
 
     def _detectar_morte(self) -> bool:
-        # Ignora detecção nos primeiros 120 passos (~30s de episódio / ~60s de jogo
-        # real contando o reset) para evitar detectar a tela de Game Over do episódio
-        # anterior, que pode persistir durante a transição de reset.
-        if self.passos < 120:
+        # O reset já dorme 35s antes do episódio começar — a tela de game over do
+        # episódio anterior já desapareceu. Guard de 30 passos (~10s) é suficiente
+        # para cobrir a transição de fade-in, sem cegar a detecção em mortes rápidas.
+        if self.passos < 30:
             return False
         
         frame = self._capturar_janela()
