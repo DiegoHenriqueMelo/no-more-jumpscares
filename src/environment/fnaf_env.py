@@ -194,6 +194,7 @@ class FNAFEnv(gym.Env):
         self.cooldown_camera          = 0  # bloqueia abrir/fechar câmera (animação ~1.0s)
         self._pixel_antes_porta: tuple | None = None  # (B, G, R) do botão antes do clique
         self._template_camera_discordancia = 0  # nº de checks consecutivos discordantes
+        self._pen_repeticao = PenalidadeRepeticao()
         self._episodio_num        = 0
         self._count_sync_camera   = 0
         self._count_porta_falha   = 0
@@ -455,6 +456,7 @@ class FNAFEnv(gym.Env):
         self._template_camera_discordancia = 0
         self._episodio_num           += 1
         self._count_sync_camera       = 0
+        self._pen_repeticao.reset()
         self._count_porta_falha       = 0
         self._count_sync_porta        = 0
         self._horas_bonificadas       = set()

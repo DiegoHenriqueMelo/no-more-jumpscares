@@ -183,7 +183,6 @@ def treinar(timesteps: int = 500_000, carregar_modelo: str = None, log_steps: bo
             policy_kwargs=policy_kwargs,
             learning_rate=3e-4,
             n_steps=2048,
-            ent_coef=0.01,
             batch_size=64,
             n_epochs=10,
             gamma=0.995,
