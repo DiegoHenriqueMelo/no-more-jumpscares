@@ -51,6 +51,15 @@ Treinar RecurrentPPO (LSTM)          ← fluxo principal
 **Arquivo:** `src/agent/train_recurrent.py`  
 **Algoritmo:** RecurrentPPO com LSTM — o agente tem memória entre frames.
 
+#### Via main.py (forma mais simples)
+
+```bash
+python main.py treino
+# Detecta automaticamente: BC warmup, checkpoint anterior ou do zero
+```
+
+#### Via script direto (opções avançadas)
+
 #### Novo treinamento (do zero)
 
 ```bash
@@ -118,9 +127,11 @@ Segure **F12** a qualquer momento para pausar. Solte para continuar.
 
 **Arquivo:** `src/agent/train.py`  
 O PPO padrão sem LSTM. Mantido para compatibilidade com modelos antigos.
-Para novos treinos, prefira o `train_recurrent.py`.
+Para novos treinos, use `python main.py treino` (RecurrentPPO).
 
 ```bash
+python main.py treino-legacy
+# ou diretamente:
 python -m src.agent.train
 python -m src.agent.train --timesteps 500000
 python -m src.agent.train --modelo modelos/fnaf_ppo_final.zip

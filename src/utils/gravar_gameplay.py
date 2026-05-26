@@ -46,7 +46,12 @@ import pyautogui
 import pygetwindow as gw
 
 from src.utils.capture import GameCapture
-from src.environment.fnaf_env import COORDS, ACOES, WINDOW_TITLE
+from src.environment.fnaf_env import (
+    COORDS, ACOES, WINDOW_TITLE,
+    SIDE_SWITCH_DELAY, CAMERA_EXIT_DELAY,
+    CAMERA_DRAG_PIXELS, CAMERA_DRAG_DURATION,
+    LADO_POR_ACAO, ACOES_CAMERA,
+)
 
 cap = GameCapture()
 
@@ -89,48 +94,116 @@ def acao_para_numero(nome_acao: str) -> int:
     return 0  # "nada" se não encontrado
 
 
-def executar_acao_no_jogo(nome_acao: str):
-    """Executa a ação no jogo — clique simples ou arrasto para câmera."""
-    if nome_acao == "abrir_fechar_camera":
-        x, y = COORDS["abrir_fechar_camera"]
-        pyautogui.moveTo(x, y - 80, duration=0.05)
-        pyautogui.moveTo(x, y, duration=0.15)
-        time.sleep(0.08)
-        pyautogui.moveTo(x, y - 80, duration=0.10)
+def executar_acao_no_jogo(nome_acao: str, estado: "EstadoJogo"):
+    """Executa a ação no jogo aplicando os mesmos delays do ambiente de treino.
 
-    elif nome_acao in COORDS:
-        x, y = COORDS[nome_acao]
+    - SIDE_SWITCH_DELAY: aguarda a virada de cabeça ao trocar de lado
+      (esquerdo ↔ direito) antes de clicar, igual ao fnaf_env._executar_acao.
+    - CAMERA_EXIT_DELAY: aguarda a animação da prancheta fechar antes de
+      clicar em porta/luz, idêntico ao que o agente faz durante o treino.
+
+    Isso elimina o duplo clique que o humano precisa dar para compensar
+    o atraso do jogo — o script agora espera automaticamente, como a IA faz.
+    """
+    if nome_acao not in COORDS:
+        return
+
+    x, y = COORDS[nome_acao]
+    lado_alvo = LADO_POR_ACAO.get(nome_acao)
+
+    # Flags de contexto (usando ultima_acao = ação ANTERIOR ao clique atual)
+    _saindo_camera = (
+        estado.ultima_acao in ACOES_CAMERA
+        or estado.ultima_acao == "abrir_fechar_camera"
+    )
+    _indo_porta_luz = nome_acao in {
+        "luz_esquerda", "luz_direita", "porta_esquerda", "porta_direita"
+    }
+    _trocando_lado = bool(
+        lado_alvo and estado.lado_atual and lado_alvo != estado.lado_atual
+    )
+
+    if nome_acao == "abrir_fechar_camera":
+        # Pré-posiciona ACIMA do botão (evita hover acidental que dispara toggle)
+        pyautogui.moveTo(x, y - CAMERA_DRAG_PIXELS, duration=0.05)
+        if _saindo_camera or _trocando_lado:
+            delay = CAMERA_EXIT_DELAY if _saindo_camera else SIDE_SWITCH_DELAY
+            time.sleep(delay)
+        # Arrasto para baixo (abre/fecha) + recuo para cima
+        pyautogui.moveTo(x, y, duration=CAMERA_DRAG_DURATION)
+        time.sleep(0.08)
+        pyautogui.moveTo(x, y - CAMERA_DRAG_PIXELS, duration=CAMERA_DRAG_DURATION)
+
+    else:
+        pyautogui.moveTo(x, y, duration=0.05)
+        if _saindo_camera and _indo_porta_luz:
+            time.sleep(CAMERA_EXIT_DELAY)
+        elif _trocando_lado:
+            time.sleep(SIDE_SWITCH_DELAY)
         pyautogui.click(x, y)
+
+    # Atualiza rastreamento de lado e última ação para o próximo clique
+    if lado_alvo:
+        estado.lado_atual = lado_alvo
+    estado.ultima_acao = nome_acao
 
 
 class EstadoJogo:
     """Rastreia o estado interno do jogo conforme as ações do humano.
 
-    Espelha a lógica de FNAFEnv incluindo cooldown de câmera — necessário
-    para que o 9º estado (cooldown_camera > 0) seja gravado corretamente.
+    Espelha a lógica de FNAFEnv incluindo cooldowns de câmera e porta —
+    necessário para bloquear ações inválidas antes de enviá-las ao jogo,
+    evitando desync entre o estado interno e o que o jogo exibe.
     """
 
     # Cooldown de câmera em número de frames (~4 fps × 1.0s = 4 frames)
     COOLDOWN_CAMERA_FRAMES = 4
+    # Cooldown de porta em número de frames (~4 fps × 0.75s ≈ 3 frames)
+    # Idêntico ao fnaf_env (cooldown_porta_esq = 3).
+    COOLDOWN_PORTA_FRAMES = 3
 
     def __init__(self):
-        self.porta_esq      = False
-        self.porta_dir      = False
-        self.luz_esq        = False
-        self.luz_dir        = False
-        self.camera_aberta  = False
-        self.camera_ativa   = 0
+        self.porta_esq       = False
+        self.porta_dir       = False
+        self.luz_esq         = False
+        self.luz_dir         = False
+        self.camera_aberta   = False
+        self.camera_ativa    = 0
         self.cooldown_camera = 0   # frames restantes de cooldown de câmera
-        self.energia        = 100.0
-        self._inicio_ep     = time.perf_counter()
+        self.cooldown_porta_esq = 0
+        self.cooldown_porta_dir = 0
+        self.energia         = 100.0
+        self._inicio_ep      = time.perf_counter()
+        # Rastreamento de lado/última ação — usados por executar_acao_no_jogo
+        # para aplicar os mesmos delays que o fnaf_env usa durante o treino.
+        self.lado_atual  = "centro"
+        self.ultima_acao = "nada"
 
-    def aplicar_acao(self, nome_acao: str):
-        """Atualiza o estado interno conforme a ação executada."""
+    def aplicar_acao(self, nome_acao: str) -> bool:
+        """Atualiza o estado interno conforme a ação executada.
+
+        Retorna True se a ação teve efeito, False se foi bloqueada por cooldown
+        ou por estado inválido (ex: tentar porta com câmera aberta).
+        O handler usa esse retorno para decidir se clica no jogo e registra
+        a ação no dataset — cliques bloqueados não são gravados.
+        """
+        # Porta e luz não funcionam com câmera aberta
+        if nome_acao in {"porta_esquerda", "porta_direita",
+                         "luz_esquerda", "luz_direita"}:
+            if self.camera_aberta:
+                return False
+
         if nome_acao == "porta_esquerda":
+            if self.cooldown_porta_esq > 0:
+                return False
             self.porta_esq = not self.porta_esq
+            self.cooldown_porta_esq = self.COOLDOWN_PORTA_FRAMES
 
         elif nome_acao == "porta_direita":
+            if self.cooldown_porta_dir > 0:
+                return False
             self.porta_dir = not self.porta_dir
+            self.cooldown_porta_dir = self.COOLDOWN_PORTA_FRAMES
 
         elif nome_acao == "luz_esquerda":
             if self.luz_esq:
@@ -147,18 +220,22 @@ class EstadoJogo:
                 self.luz_dir = True
 
         elif nome_acao == "abrir_fechar_camera":
-            if self.cooldown_camera == 0:
-                self.camera_aberta = not self.camera_aberta
-                self.cooldown_camera = self.COOLDOWN_CAMERA_FRAMES
-                if not self.camera_aberta:
-                    self.camera_ativa = 0
-                if self.camera_aberta:
-                    self.luz_esq = False
-                    self.luz_dir = False
+            if self.cooldown_camera > 0:
+                return False
+            self.camera_aberta = not self.camera_aberta
+            self.cooldown_camera = self.COOLDOWN_CAMERA_FRAMES
+            if not self.camera_aberta:
+                self.camera_ativa = 0
+            if self.camera_aberta:
+                self.luz_esq = False
+                self.luz_dir = False
 
         elif nome_acao.startswith("camera_"):
-            if self.camera_aberta:
-                self.camera_ativa = CAMERA_PARA_IDX.get(nome_acao, 0)
+            if not self.camera_aberta:
+                return False
+            self.camera_ativa = CAMERA_PARA_IDX.get(nome_acao, 0)
+
+        return True
 
     def tick(self, dt: float):
         """Avança um frame: atualiza energia e decrementa cooldowns."""
@@ -172,9 +249,13 @@ class EstadoJogo:
         consumo_por_segundo = 0.104 + itens_ativos * 0.100
         self.energia = max(0.0, self.energia - consumo_por_segundo * dt)
 
-        # Cooldown de câmera
+        # Cooldowns
         if self.cooldown_camera > 0:
             self.cooldown_camera -= 1
+        if self.cooldown_porta_esq > 0:
+            self.cooldown_porta_esq -= 1
+        if self.cooldown_porta_dir > 0:
+            self.cooldown_porta_dir -= 1
 
     def tempo_ep(self) -> float:
         return time.perf_counter() - self._inicio_ep
@@ -220,10 +301,15 @@ def gravar():
     def fazer_handler(nome_acao):
         def handler(event):
             nonlocal acao_atual
+            aplicou = estado.aplicar_acao(nome_acao)
+            if not aplicou:
+                # Ação bloqueada por cooldown ou estado inválido — não clica
+                # no jogo e não registra no dataset (evita desync).
+                print(f"  [{event.name:>3}] → {nome_acao} BLOQUEADO (cooldown/câmera)")
+                return
             acao_atual = nome_acao
-            estado.aplicar_acao(nome_acao)
-            executar_acao_no_jogo(nome_acao)
-            print(f"  [{event.name:>3}] → {nome_acao} | E:{estado.energia:.1f}%")
+            executar_acao_no_jogo(nome_acao, estado)
+            print(f"  [{event.name:>3}] → {nome_acao} | lado:{estado.lado_atual} | E:{estado.energia:.1f}%")
         return handler
 
     hooks = []

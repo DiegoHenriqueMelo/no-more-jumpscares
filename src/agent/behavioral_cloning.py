@@ -80,19 +80,48 @@ class GameplayDataset(Dataset):
     ausente em datasets antigos.
     """
 
-    def __init__(self, caminhos_json: list[str]):
-        self.dados = []
+    def __init__(self, caminhos_json: list[str], max_nada_ratio: float = 2.0):
+        """
+        Args:
+            caminhos_json: lista de arquivos dataset.json.
+            max_nada_ratio: máximo de frames "nada" por frame de ação real.
+                2.0 (padrão) → no máximo 2 "nada" para cada 1 ação.
+                0.0          → remove todos os "nada".
+                float("inf") → mantém todos (comportamento antigo).
+                Ex: se há 500 ações reais e 4000 "nada", com ratio=2.0
+                apenas 1000 "nada" são mantidos, descartando 3000.
+        """
+        brutos = []
 
         for caminho in caminhos_json:
             with open(caminho, "r") as f:
                 dados = json.load(f)
-                self.dados.extend(dados)
+                brutos.extend(dados)
                 print(f"Carregado: {caminho} ({len(dados)} frames)")
 
-        print(f"\nTotal combinado: {len(self.dados)} frames")
+        acoes_reais = [d for d in brutos if d["acao"] != 0]
+        frames_nada = [d for d in brutos if d["acao"] == 0]
 
-        acoes_reais = [d for d in self.dados if d["acao"] != 0]
-        print(f"Frames com ação real: {len(acoes_reais)}")
+        # Limita "nada" para evitar que o modelo aprenda a ficar parado
+        limite_nada = int(len(acoes_reais) * max_nada_ratio)
+        if len(frames_nada) > limite_nada:
+            # Distribui o corte uniformemente ao longo do tempo (não apenas
+            # descarta os últimos) para preservar a distribuição temporal.
+            passo = len(frames_nada) / limite_nada
+            frames_nada = [frames_nada[int(i * passo)] for i in range(limite_nada)]
+            print(
+                f"\nFrames 'nada' reduzidos: {len([d for d in brutos if d['acao'] == 0])} "
+                f"→ {len(frames_nada)} (ratio {max_nada_ratio}x ações reais)"
+            )
+
+        self.dados = acoes_reais + frames_nada
+        # Re-embaralha para misturar "nada" e ações ao longo das épocas
+        import random
+        random.shuffle(self.dados)
+
+        print(f"\nTotal após balanceamento: {len(self.dados)} frames")
+        print(f"  Ações reais : {len(acoes_reais)}")
+        print(f"  'nada'      : {len(frames_nada)}")
 
         contagem = Counter(d["nome"] for d in self.dados)
         print("\nDistribuição de ações:")
@@ -155,6 +184,7 @@ def treinar_bc(
     epochs: int = 50,
     lr: float = 1e-3,
     batch_size: int = 32,
+    max_nada_ratio: float = 2.0,
 ) -> PPO:
     """Treina um modelo PPO via Behavioral Cloning.
 
@@ -166,13 +196,15 @@ def treinar_bc(
         epochs: número de épocas de treinamento.
         lr: learning rate do otimizador Adam.
         batch_size: tamanho do batch.
+        max_nada_ratio: máximo de frames "nada" por frame de ação real (padrão: 2.0).
+            Evita que o modelo aprenda a ficar parado porque "nada" domina o dataset.
 
     Returns:
         Modelo PPO treinado (sem LSTM — use --ppo-antigo para combinar com RecurrentPPO).
     """
     print("=== Behavioral Cloning ===\n")
 
-    dataset = GameplayDataset(caminhos_json)
+    dataset = GameplayDataset(caminhos_json, max_nada_ratio=max_nada_ratio)
     loader  = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0)
 
     # Cria PPO com ambiente dummy — sem abrir o jogo
@@ -195,6 +227,19 @@ def treinar_bc(
     policy    = modelo.policy
     optimizer = optim.Adam(policy.parameters(), lr=lr)
 
+    # Pesos de classe: cada ação recebe peso = total / (n_classes × contagem).
+    # Isso impede que ações raras (ex: camera_7) sejam ignoradas pelo modelo
+    # em favor de "nada", que domina o dataset mesmo após o balanceamento.
+    contagem_acoes = Counter(d["acao"] for d in dataset.dados)
+    pesos_classe = torch.ones(NUM_ACOES, device=modelo.device)
+    total_amostras = len(dataset.dados)
+    for acao_id, count in contagem_acoes.items():
+        pesos_classe[acao_id] = total_amostras / (NUM_ACOES * count)
+    print("Pesos de classe (inverso da frequência):")
+    for acao_id in sorted(contagem_acoes):
+        from src.environment.fnaf_env import ACOES
+        print(f"  {ACOES[acao_id]:25s}: {pesos_classe[acao_id].item():.3f}")
+
     print(f"\nTreinando por {epochs} épocas (batch={batch_size}, lr={lr})...\n")
 
     melhor_acuracia = 0.0
@@ -213,7 +258,10 @@ def treinar_bc(
 
             distribution = policy.get_distribution(obs_device)
             log_probs    = distribution.log_prob(acoes)
-            loss         = -log_probs.mean()
+
+            # Pondera o loss: ações raras têm peso maior, "nada" tem peso menor
+            pesos_batch = pesos_classe[acoes]
+            loss        = -(log_probs * pesos_batch).mean()
 
             optimizer.zero_grad()
             loss.backward()
@@ -348,6 +396,14 @@ if __name__ == "__main__":
         "--batch", type=int, default=32,
         help="Tamanho do batch (padrão: 32)",
     )
+    parser.add_argument(
+        "--nada-ratio", type=float, default=2.0,
+        dest="nada_ratio",
+        help=(
+            "Máximo de frames 'nada' por frame de ação real (padrão: 2.0). "
+            "Use 0 para remover todos os 'nada', inf para manter todos."
+        ),
+    )
     args = parser.parse_args()
 
     # Expande globs
@@ -368,4 +424,5 @@ if __name__ == "__main__":
         epochs=args.epochs,
         lr=args.lr,
         batch_size=args.batch,
+        max_nada_ratio=args.nada_ratio,
     )

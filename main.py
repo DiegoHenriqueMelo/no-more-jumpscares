@@ -2,9 +2,9 @@
 
 Modos disponíveis
 -----------------
-    python main.py teste              # testa reset do ambiente
-    python main.py treino             # treino PPO padrão (legado)
-    python main.py treino-recurrent   # treino RecurrentPPO com LSTM (recomendado)
+    python main.py teste          # testa reset do ambiente
+    python main.py treino         # treino RecurrentPPO com LSTM (recomendado)
+    python main.py treino-legacy  # treino PPO padrão (sem LSTM, legado)
 
 Para opções avançadas (timesteps, modelo, ppo-antigo, etc.) use os scripts
 diretamente:
@@ -106,12 +106,15 @@ if __name__ == "__main__":
     if modo == "teste":
         modo_teste()
     elif modo == "treino":
+        modo_treino_recurrent()
+    elif modo in ("treino-legacy", "treino_legacy", "legacy"):
         modo_treino()
     elif modo in ("treino-recurrent", "treino_recurrent", "recurrent"):
+        # Alias mantido para compatibilidade
         modo_treino_recurrent()
     else:
         print(f"Modo desconhecido: {modo}")
         print("Use:")
-        print("  python main.py teste              — testa o reset do ambiente")
-        print("  python main.py treino-recurrent   — treino RecurrentPPO (recomendado)")
-        print("  python main.py treino             — treino PPO padrão (legado)")
+        print("  python main.py teste          — testa o reset do ambiente")
+        print("  python main.py treino         — treino RecurrentPPO (recomendado)")
+        print("  python main.py treino-legacy  — treino PPO padrão (sem LSTM, legado)")
