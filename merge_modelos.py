@@ -1,12 +1,34 @@
 import sys
-import numpy as np
 from stable_baselines3 import PPO
 from src.environment.fnaf_env import FNAFEnv
 
+AVISO = """
+╔══════════════════════════════════════════════════════════════════════════╗
+║  AVISO IMPORTANTE — leia antes de usar este script                        ║
+╠══════════════════════════════════════════════════════════════════════════╣
+║  Fazer a média de pesos de redes neurais SÓ faz sentido quando os         ║
+║  modelos vêm da MESMA linhagem de treino (mesma inicialização, ex.:       ║
+║  checkpoints diferentes do mesmo run, ou runs que partiram do mesmo       ║
+║  modelo base e treinaram pouco depois disso).                             ║
+║                                                                            ║
+║  Modelos treinados do zero em PCs diferentes têm inicializações           ║
+║  aleatórias diferentes: os neurônios não se correspondem entre as redes.  ║
+║  A média dos pesos NÃO combina o aprendizado — produz uma política        ║
+║  quebrada, próxima do aleatório, e o treino "recomeça do zero" sem        ║
+║  você perceber. (Federated averaging real exige inicialização comum e     ║
+║  sincronização frequente.)                                                ║
+║                                                                            ║
+║  Se o objetivo é aproveitar o treino de vários PCs, escolha o MELHOR      ║
+║  modelo (maior taxa de vitória / recompensa) e continue o treino dele.    ║
+╚══════════════════════════════════════════════════════════════════════════╝
+"""
+
+
 def merge_modelos(caminhos: list[str], saida: str = "modelos/fnaf_merged.zip"):
-    """
-    Faz a média dos pesos de múltiplos modelos PPO.
-    Equivale ao Federated Learning — combina o aprendizado de vários PCs.
+    """Faz a média dos pesos de múltiplos modelos PPO.
+
+    Só use com checkpoints da MESMA linhagem de treino (mesma inicialização).
+    Para modelos independentes, o resultado é uma política quebrada.
     """
     print(f"Carregando {len(caminhos)} modelos...")
 
@@ -38,16 +60,23 @@ def merge_modelos(caminhos: list[str], saida: str = "modelos/fnaf_merged.zip"):
     # Salva o modelo merged
     modelo_base.save(saida)
     print(f"\nModelo merged salvo em: {saida}")
-    print(f"Equivalente a {len(caminhos)}x mais experiência combinada!")
 
     env.close()
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print("Uso: python merge_modelos.py modelo1.zip modelo2.zip [modelo3.zip ...]")
-        print("Exemplo: python merge_modelos.py modelos/pc1_20k.zip modelos/pc2_20k.zip modelos/pc3_20k.zip")
+    print(AVISO)
+
+    args = [a for a in sys.argv[1:] if a != "--force"]
+
+    if "--force" not in sys.argv:
+        print("Para confirmar que os modelos vêm da mesma linhagem de treino,")
+        print("rode novamente com a flag --force:")
+        print("  python merge_modelos.py --force modelo1.zip modelo2.zip [...]")
         sys.exit(1)
 
-    caminhos = sys.argv[1:]
-    merge_modelos(caminhos)
+    if len(args) < 2:
+        print("Uso: python merge_modelos.py --force modelo1.zip modelo2.zip [modelo3.zip ...]")
+        sys.exit(1)
+
+    merge_modelos(args)

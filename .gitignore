@@ -210,8 +210,19 @@ __marimo__/
 logs
 logs_analysis
 *.png
+!src/utils/referencias/camera_aberta.png
 *.jpg
 
 
 *.xlsx
 *.pbix
+
+# Modelos treinados e datasets de gameplay nao sao codigo — ficam fora do git.
+# (O historico antigo de checkpoints inflou o .git para ~2 GB; ver
+# docs/ALTERACOES_COMPLETAS.md, secao "Limpeza do repositorio".)
+modelos/
+dados/
+
+# Configuracao local do Claude Code — pessoal de cada maquina (caminhos
+# absolutos, allowlist de permissoes). Nao deve ser compartilhada.
+.claude/settings.local.json

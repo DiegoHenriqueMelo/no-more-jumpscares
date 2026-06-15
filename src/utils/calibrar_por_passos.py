@@ -115,6 +115,7 @@ def _capturar_coordenada() -> tuple[int, int]:
     return int(x), int(y)
 
 
+
 def _imprimir_bloco_env(coords: dict[str, tuple[int, int]]) -> None:
     print("\n" + "=" * 72)
     print("BLOCO FORMATADO PARA O .env")
@@ -128,7 +129,6 @@ def _imprimir_bloco_env(coords: dict[str, tuple[int, int]]) -> None:
             print(f"{passo.variavel_base}_X={x}")
             print(f"{passo.variavel_base}_Y={y}")
             print()
-
 
 def executar_calibracao_guiada() -> None:
     print("Calibracao guiada por passos")
