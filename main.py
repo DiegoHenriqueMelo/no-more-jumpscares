@@ -110,6 +110,78 @@ def modo_jogar():
         env.close()
 
 
+def modo_debug():
+    """Roda a IA jogando (usando os steps) SEM aprender, imprimindo o vetor de
+    estados a cada passo — foco em acompanhar os slots de perigo da detecção.
+
+    Usa o modelo mais recente se houver; senão, joga com ações ALEATÓRIAS (basta
+    para depurar o pipeline de observação/detecção)."""
+    from src.environment.fnaf_env import ACOES, N_ESTADOS
+    from src.environment.deteccao_visual import SLOTS_PERIGO
+
+    env = FNAFEnv()
+
+    modelo = None
+    caminho = encontrar_ultimo_modelo()
+    if caminho:
+        from stable_baselines3 import PPO
+        try:
+            modelo = PPO.load(caminho, env=env)
+            print(f"Modelo carregado (NÃO aprende): {caminho}")
+        except Exception as erro:
+            print(f"Falha ao carregar {caminho} ({erro}). Usando ações aleatórias.")
+    if modelo is None:
+        print("Sem modelo compatível — jogando com ações ALEATÓRIAS para depurar.")
+
+    faltando = env.detector.regioes_faltando()
+    if faltando:
+        print(f"[INFO] Regiões sem referência (perigo fica 0): {', '.join(faltando)}")
+    print("Ctrl+C para sair.\n")
+
+    def _linhas(est):
+        base = (f"porta E/D={int(est[0])}/{int(est[1])}  luz E/D={int(est[2])}/{int(est[3])}  "
+                f"cam={int(est[4])}(ativa {est[5]*11:.0f})  energia={est[6]*100:4.0f}%  "
+                f"tempo={est[7]*535:5.0f}s")
+        perigo = "  ".join(f"{slot}={est[8 + i]:.2f}" for i, slot in enumerate(SLOTS_PERIGO))
+        return base, perigo
+
+    try:
+        episodio = 0
+        while True:
+            episodio += 1
+            obs, _ = env.reset()
+            terminado = truncado = False
+            passo = 0
+            total = 0.0
+            info = {}
+            while not (terminado or truncado):
+                if modelo is not None:
+                    acao, _ = modelo.predict(obs, deterministic=True)
+                    acao = int(acao)
+                else:
+                    acao = int(env.action_space.sample())
+
+                obs, recompensa, terminado, truncado, info = env.step(acao)
+                passo += 1
+                total += recompensa
+
+                base, perigo = _linhas(obs["estados"])
+                print(f"Ep{episodio} Step{passo:4d} | {ACOES[acao]:18s} | "
+                      f"R={recompensa:+6.2f}  tot={total:+8.1f}")
+                print(f"   estados: {base}")
+                print(f"   PERIGO : {perigo}")
+
+            desfecho = ("morte" if info.get("morreu")
+                        else "vitoria" if terminado
+                        else "interrompido" if info.get("interrompido")
+                        else "truncado")
+            print(f"--- fim ep {episodio}: {desfecho} | passos={passo} | recompensa={total:+.1f} ---\n")
+    except KeyboardInterrupt:
+        print("\nEncerrado.")
+    finally:
+        env.close()
+
+
 if __name__ == "__main__":
     modo = sys.argv[1] if len(sys.argv) > 1 else "teste"
 
@@ -119,6 +191,8 @@ if __name__ == "__main__":
         modo_treino()
     elif modo == "jogar":
         modo_jogar()
+    elif modo == "debug":
+        modo_debug()
     else:
         print(f"Modo desconhecido: {modo}")
-        print("Use: python main.py teste | python main.py treino [--novo] | python main.py jogar")
+        print("Use: python main.py teste | treino [--novo] | jogar | debug")
