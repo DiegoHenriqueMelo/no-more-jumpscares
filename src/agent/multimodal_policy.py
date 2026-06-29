@@ -22,8 +22,11 @@ class MultimodalExtractor(BaseFeaturesExtractor):
             sample_img = torch.zeros(1, 1, 84, 84)
             cnn_output_dim = self.cnn(sample_img).shape[1]
 
+        # Dimensão do vetor de estados vem do próprio espaço — acompanha a adição
+        # dos slots de perigo da detecção visual sem precisar editar aqui.
+        n_estados = observation_space["estados"].shape[0]
         self.fc_estados = nn.Sequential(
-            nn.Linear(8, 32),
+            nn.Linear(n_estados, 32),
             nn.ReLU(),
         )
 

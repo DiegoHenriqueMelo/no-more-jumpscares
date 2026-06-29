@@ -8,6 +8,13 @@ import unicodedata
 from pathlib import Path
 from gymnasium import spaces
 from src.utils.capture import GameCapture
+from src.environment.deteccao_visual import (
+    DetectorAnimatronicos,
+    SLOTS_PERIGO,
+    REGIOES_POR_LADO,
+    CAMERA_ATIVA_PARA_REGIAO,
+    CONF_GATE,
+)
 
 def _carregar_env(caminho: str = ".env") -> None:
     if not os.path.exists(caminho):
@@ -29,6 +36,10 @@ _carregar_env()
 
 LARGURA = 84
 ALTURA  = 84
+
+# Vetor de estados: 8 internos + 1 perigo por slot de detecção (ver SLOTS_PERIGO).
+N_ESTADOS_BASE = 8
+N_ESTADOS = N_ESTADOS_BASE + len(SLOTS_PERIGO)  # 8 + 7 = 15
 
 ACOES = {
     0:  "nada",
@@ -156,6 +167,8 @@ class FNAFEnv(gym.Env):
         self.render_mode      = render_mode
         self.contador_vitoria = 0
         self._carregar_templates()
+        self.detector         = DetectorAnimatronicos()
+        self._zerar_perigos()
 
         self.observation_space = spaces.Dict({
             "imagem": spaces.Box(
@@ -165,7 +178,7 @@ class FNAFEnv(gym.Env):
             ),
             "estados": spaces.Box(
                 low=0, high=1,
-                shape=(8,),
+                shape=(N_ESTADOS,),
                 dtype=np.float32
             )
         })
@@ -418,7 +431,7 @@ class FNAFEnv(gym.Env):
 
         observacao = {
             "imagem": np.zeros((ALTURA, LARGURA, 1), dtype=np.uint8),
-            "estados": np.zeros(8, dtype=np.float32)
+            "estados": np.zeros(N_ESTADOS, dtype=np.float32)
         }
         return observacao, 0.0, True, False, info
 
@@ -460,6 +473,7 @@ class FNAFEnv(gym.Env):
         self._count_sync_porta        = 0
         self._horas_bonificadas       = set()
         self._total_bonus_hora        = 0.0
+        self._zerar_perigos()
 
         if not self._janela_do_jogo_aberta():
             self._abrir_jogo_fallback()
@@ -863,12 +877,45 @@ class FNAFEnv(gym.Env):
 
         return recompensa
 
+    def _zerar_perigos(self) -> None:
+        # Perigo observado por slot (esq, dir, cada câmera) — começa em 0 (crença
+        # "nada visto"). Atualizado só quando a região é observável; senão mantém.
+        self.perigo_obs = {slot: 0.0 for slot in SLOTS_PERIGO}
+
+    def _perigo_lado(self, slot: str, regioes: list, frame_full: np.ndarray) -> None:
+        vals = []
+        for r in regioes:
+            perigo, conf = self.detector.detectar_regiao(frame_full, r)
+            if conf >= CONF_GATE:
+                vals.append(perigo)
+        if vals:
+            self.perigo_obs[slot] = max(vals)
+
+    def _atualizar_perigos(self, frame_full: np.ndarray) -> None:
+        """Atualiza o perigo SÓ das regiões observáveis agora: porta/janela com a
+        luz daquele lado acesa; câmera com a tab daquela câmera ativa. Fora disso,
+        mantém o último valor (o agente precisa reacender/rechecar para atualizar).
+        Leitura de baixa confiança (chapado/estática) também não atualiza."""
+        if self.camera_aberta:
+            regiao = CAMERA_ATIVA_PARA_REGIAO.get(self.camera_ativa)
+            if regiao:
+                perigo, conf = self.detector.detectar_regiao(frame_full, regiao)
+                if conf >= CONF_GATE:
+                    self.perigo_obs[regiao] = perigo
+        else:
+            if self.luz_esq:
+                self._perigo_lado("esq", REGIOES_POR_LADO["esq"], frame_full)
+            if self.luz_dir:
+                self._perigo_lado("dir", REGIOES_POR_LADO["dir"], frame_full)
+
     def _capturar_observacao(self) -> dict:
         # Captura apenas a janela do jogo — mesma região usada na detecção de
         # morte/vitória e na gravação de gameplay (BC). Capturar a tela inteira
         # diluía o jogo em meio ao desktop no frame 84x84.
-        frame = self._capturar_janela()
-        frame = cv2.resize(frame, (LARGURA, ALTURA))
+        frame_full = self._capturar_janela()
+        self._atualizar_perigos(frame_full)
+
+        frame = cv2.resize(frame_full, (LARGURA, ALTURA))
         frame = np.expand_dims(frame, axis=-1)
 
         estados = np.array([
@@ -880,6 +927,7 @@ class FNAFEnv(gym.Env):
             float(self.camera_ativa) / 11.0,
             float(self.energia) / 100.0,
             min(self.tempo_jogo / 535.0, 1.0),
+            *[self.perigo_obs[slot] for slot in SLOTS_PERIGO],
         ], dtype=np.float32)
 
         return {"imagem": frame, "estados": estados}

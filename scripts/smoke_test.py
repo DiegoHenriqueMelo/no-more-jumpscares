@@ -20,7 +20,7 @@ import numpy as np
 import torch as th
 from stable_baselines3 import PPO
 
-from src.environment.fnaf_env import FNAFEnv
+from src.environment.fnaf_env import FNAFEnv, N_ESTADOS
 from src.agent.multimodal_policy import MultimodalExtractor
 
 
@@ -29,17 +29,17 @@ def main():
 
     # 1. Ambiente constrói e espaço correto
     env = FNAFEnv()
-    assert env.observation_space["estados"].shape == (8,), \
+    assert env.observation_space["estados"].shape == (N_ESTADOS,), \
         f"estados shape: {env.observation_space['estados'].shape}"
     assert env.observation_space["imagem"].shape == (84, 84, 1)
-    print("[OK] 1. FNAFEnv construido — espaco de observacao: imagem(84,84,1) + estados(8)")
+    print(f"[OK] 1. FNAFEnv construido — espaco de observacao: imagem(84,84,1) + estados({N_ESTADOS})")
 
     # 2. Episódio interrompido devolve obs válida (sem tentar reabrir o jogo)
     env._abrir_jogo_fallback = lambda: False
     obs_int, _, terminado, _, info = env._interromper_episodio("smoke test")
     assert env.observation_space.contains(obs_int), "obs interrompida fora do espaco!"
     assert terminado and info.get("interrompido")
-    print("[OK] 2. Episodio interrompido devolve observacao compativel (estados shape 8)")
+    print(f"[OK] 2. Episodio interrompido devolve observacao compativel (estados shape {N_ESTADOS})")
 
     # 3. Modelo PPO com a extractor multimodal (mesma config do train.py)
     modelo = PPO(
@@ -59,7 +59,7 @@ def main():
     )
     obs_branca = {
         "imagem": np.full((84, 84, 1), 255, dtype=np.uint8),
-        "estados": np.zeros(8, dtype=np.float32),
+        "estados": np.zeros(N_ESTADOS, dtype=np.float32),
     }
     acao, _ = modelo.predict(obs_branca, deterministic=True)
     hook.remove()
@@ -79,7 +79,7 @@ def main():
     # 6. Caminho do behavioral cloning: batch channels-last direto na policy
     obs_bc = {
         "imagem": th.zeros(4, 84, 84, 1, dtype=th.uint8),
-        "estados": th.zeros(4, 8, dtype=th.float32),
+        "estados": th.zeros(4, N_ESTADOS, dtype=th.float32),
     }
     dist = modelo.policy.get_distribution(obs_bc)
     log_probs = dist.log_prob(th.zeros(4, dtype=th.long))

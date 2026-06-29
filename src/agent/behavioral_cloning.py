@@ -7,6 +7,7 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from stable_baselines3 import PPO
 from src.environment.fnaf_env import FNAFEnv
+from src.environment.deteccao_visual import SLOTS_PERIGO
 from src.agent.multimodal_policy import MultimodalExtractor
 from pathlib import Path
 from collections import Counter
@@ -65,6 +66,12 @@ class GameplayDataset(Dataset):
             float(dado.get("energia", 100)) / 100.0,
             min(float(dado.get("tempo_ep", 0)) / 535.0, 1.0),
         ], dtype=np.float32)
+
+        # Frames de BC são 84x84 — não dá para rodar a detecção por ROI neles.
+        # Os slots de perigo entram NEUTROS (0); só o RL aprende a usá-los.
+        estados = np.concatenate(
+            [estados, np.zeros(len(SLOTS_PERIGO), dtype=np.float32)]
+        )
 
         acao = int(dado["acao"])
         
