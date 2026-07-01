@@ -898,7 +898,9 @@ class FNAFEnv(gym.Env):
         Leitura de baixa confiança (chapado/estática) também não atualiza."""
         if self.camera_aberta:
             regiao = CAMERA_ATIVA_PARA_REGIAO.get(self.camera_ativa)
-            if regiao:
+            # 'regiao in self.perigo_obs' respeita DETECTAR_CAMERAS: com câmeras
+            # desligadas, os slots de câmera não existem e a leitura é ignorada.
+            if regiao and regiao in self.perigo_obs:
                 perigo, conf = self.detector.detectar_regiao(frame_full, regiao)
                 if conf >= CONF_GATE:
                     self.perigo_obs[regiao] = perigo

@@ -72,17 +72,19 @@ CONF_GATE           = 0.5
 # para afiná-las olhando o diagnóstico ao vivo. Não confie nelas sem validar.
 REGIOES: dict[str, dict] = {
     # ── Lado ESQUERDO ────────────────────────────────────────────────────────
-    # O animatrônico aparece no VÃO DA PORTA; a SOMBRA dele aparece na JANELA ao
-    # lado. Dois pontos de observação do MESMO lado (a sombra costuma avisar mais
-    # cedo). Ficam separados de propósito: ROI menor = a sombra ocupa fração maior
-    # do recorte = sinal mais forte. A Etapa 3 decide se agrega num único
-    # "perigo esquerdo" ligado à ação de fechar a porta esquerda (vínculo
-    # APRENDIDO pela IA, não cabeado aqui).
+    # O animatrônico aparece no VÃO DA PORTA (porta_esq) — sinal forte e confiável
+    # (avaliação rotulada: folga ~0.32, 100%). A SOMBRA na janela (janela_esq)
+    # seria um aviso antecipado, MAS a avaliação mostrou que ela NÃO separa de
+    # forma confiável (sombra fraca/ambígua) — então fica DORMENTE (lado=None):
+    # não entra no vetor do agente, para não injetar falso positivo. O lado
+    # esquerdo confia só na porta. (Reativável se a detecção da sombra melhorar.)
     "porta_esq":  {"roi": (0.00, 0.20, 0.17, 0.95), "camera_ativa": None, "lado": "esq"},
-    "janela_esq": {"roi": (0.15, 0.28, 0.30, 0.82), "camera_ativa": None, "lado": "esq"},
+    "janela_esq": {"roi": (0.15, 0.28, 0.30, 0.82), "camera_ativa": None, "lado": None},
 
     # ── Lado DIREITO ─────────────────────────────────────────────────────────
-    # O animatrônico aparece na JANELA. A ação continua sendo fechar a porta.
+    # A Chica aparece EXCLUSIVAMENTE na JANELA — então janela_dir é o ÚNICO sinal
+    # do lado direito (não há detecção de porta aqui). A ação continua sendo
+    # fechar a porta direita (vínculo APRENDIDO pela IA, não cabeado).
     "janela_dir": {"roi": (0.83, 0.20, 1.00, 0.95), "camera_ativa": None, "lado": "dir"},
 
     # ── Câmeras (a sala ocupa quase toda a tela quando a tab está aberta) ─────
@@ -109,10 +111,16 @@ CAMERA_ATIVA_PARA_REGIAO = {
     if cfg["camera_ativa"] is not None
 }
 
+# Liga/desliga a detecção das CÂMERAS no vetor de observação. Por enquanto FALSE:
+# só as portas (porta_esq / janela_dir) foram auditadas com separação confiável;
+# as câmeras ainda precisam de calibração + ajuste do limiar de estática. Voltar
+# para True reativa os 5 slots de câmera (N_ESTADOS 10 -> 15; exige retreino).
+DETECTAR_CAMERAS = False
+
 # Slots de perigo expostos ao agente no vetor de observação (ordem FIXA).
 # 'esq'/'dir' agregam (max) as ROIs daquele lado; cada câmera-alvo é um slot.
 # O nome do slot de câmera é igual ao nome da região (cam_1c, ...).
-SLOTS_PERIGO = ("esq", "dir") + CAMERAS
+SLOTS_PERIGO = ("esq", "dir") + (CAMERAS if DETECTAR_CAMERAS else ())
 
 # ─── Overrides de ROI (ajuste fino sem editar código) ────────────────────────
 # `calibrar roi <regiao>` grava aqui as frações desenhadas com o mouse na tela
